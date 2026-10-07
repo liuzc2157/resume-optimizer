@@ -21,5 +21,5 @@ COPY --from=build /app/out /usr/share/nginx/html
 # 模板用 ${PORT}（不带默认值语法，envsubst 才能替换）；
 # CMD 里先给 PORT 兜底默认 80，再 envsubst 生成配置并启动 nginx。
 RUN printf 'server {\n  listen ${PORT};\n  server_name _;\n  root /usr/share/nginx/html;\n  index index.html;\n  location / { try_files $uri $uri/ /index.html =404; }\n}\n' > /etc/nginx/conf.d/default.conf.template
-CMD ["/bin/sh", "-c", "PORT=${PORT:-80}; envsubst '${PORT}' < /etc/nginx/conf.d/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]
+CMD ["/bin/sh", "-c", "echo \"[nginx] PORT=$PORT\"; PORT=${PORT:-80}; envsubst '${PORT}' < /etc/nginx/conf.d/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]
 EXPOSE 80
