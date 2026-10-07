@@ -16,8 +16,9 @@ ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 RUN npm run build
 
 # ---- 运行阶段：nginx 托管静态文件 ----
-# nginx 配置直接内联写入（避免依赖构建上下文中的 nginx.conf 文件）
 FROM nginx:1.27-alpine
 COPY --from=build /app/out /usr/share/nginx/html
-RUN printf 'server {\n  listen 80;\n  server_name _;\n  root /usr/share/nginx/html;\n  index index.html;\n  location / { try_files $uri $uri/ /index.html =404; }\n}\n' > /etc/nginx/conf.d/default.conf
+# 使用官方模板机制：Railway 注入 PORT（如 8080）时 nginx 监听对应端口，
+# 本地无 PORT 时回退 80。模板文件由 nginx 入口脚本自动 envsubst 到 conf.d。
+RUN mkdir -p /etc/nginx/templates && printf 'server {\n  listen ${PORT:-80};\n  server_name _;\n  root /usr/share/nginx/html;\n  index index.html;\n  location / { try_files $uri $uri/ /index.html =404; }\n}\n' > /etc/nginx/templates/default.conf.template
 EXPOSE 80
