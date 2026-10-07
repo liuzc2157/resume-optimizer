@@ -365,4 +365,75 @@ SEED_JDS: list[dict] = [
         ),
         "skills": ["功能测试", "测试用例", "缺陷管理", "Python", "自动化测试", "应届生"],
     },
+
+    # ---------------- 初级补充（2026-10 新增，对齐用户求职方向） ----------------
+    {
+        "position_category": "AI",
+        "experience_level": "初级",
+        "title": "AI 应用开发工程师（初级）",
+        "content": (
+            "岗位职责：参与公司 AI 应用产品（Agent / RAG 问答 / 智能客服）的研发，负责调用大模型 API"
+            "完成业务功能落地，编写 Prompt 并接入业务数据；参与知识库的构建与检索优化，维护向量检索链路；"
+            "配合完成功能测试与线上问题排查。\n"
+            "任职要求：1. 本科及以上学历，计算机相关专业，应届或 1 年以内经验；2. 熟悉 Python，"
+            "了解 FastAPI/Flask 等框架，有调用大模型 API（OpenAI/智谱等）经验优先；"
+            "3. 了解 RAG、向量数据库或 LangChain/LangGraph 者优先；4. 学习能力强，对 AI 应用开发有热情。"
+        ),
+        "skills": ["Python", "FastAPI", "大模型API", "Prompt", "RAG", "向量检索", "LangChain"],
+    },
+    {
+        "position_category": "后端",
+        "experience_level": "初级",
+        "title": "Python 后端开发工程师（初级）",
+        "content": (
+            "岗位职责：负责业务系统后端接口的开发与维护，使用 Python + FastAPI/Django 编写 RESTful API；"
+            "基于 MySQL/Redis 完成数据存储与缓存设计；参与代码评审与单元测试，保障接口质量；"
+            "配合前端完成联调。\n"
+            "任职要求：1. 本科及以上学历，计算机相关专业，应届或 1 年以内经验；2. 熟悉 Python 基础语法"
+            "与常用库，了解 FastAPI/Django 任一框架；3. 了解 MySQL、Redis 的基本使用；"
+            "4. 有 GitHub 项目或实习经历者优先。"
+        ),
+        "skills": ["Python", "FastAPI", "Django", "MySQL", "Redis", "RESTful API"],
+    },
+    {
+        "position_category": "后端",
+        "experience_level": "初级",
+        "title": "全栈开发工程师（初级）",
+        "content": (
+            "岗位职责：参与产品前后端功能的开发，前端使用 React/Next.js 实现页面，"
+            "后端使用 Node.js/Python 编写接口；负责日常需求迭代、Bug 修复与功能自测；"
+            "参与技术方案讨论并沉淀文档。\n"
+            "任职要求：1. 本科及以上学历，计算机相关专业，应届或 1 年以内经验；"
+            "2. 掌握 HTML/CSS/JavaScript/TypeScript，了解 React 或 Vue；"
+            "3. 了解 Node.js 或 Python 任一后端语言；4. 了解数据库基本操作，有完整项目作品者优先。"
+        ),
+        "skills": ["JavaScript", "TypeScript", "React", "Next.js", "Node.js", "Python"],
+    },
+    {
+        "position_category": "移动端",
+        "experience_level": "初级",
+        "title": "移动端开发工程师（初级）",
+        "content": (
+            "岗位职责：参与 iOS/Android 移动端应用的开发与维护，使用 Flutter/React Native 完成业务页面"
+            "与交互；对接后端接口，处理数据展示与状态管理；参与性能优化与线上问题修复。\n"
+            "任职要求：1. 本科及以上学历，计算机相关专业，应届或 1 年以内经验；"
+            "2. 熟悉 Dart 或 JavaScript，了解 Flutter 或 React Native 任一框架；"
+            "3. 了解 RESTful API 对接与移动端调试工具；4. 有上架作品或开源项目者优先。"
+        ),
+        "skills": ["Flutter", "React Native", "Dart", "JavaScript", "RESTful API"],
+    },
+    {
+        "position_category": "运维",
+        "experience_level": "初级",
+        "title": "运维工程师（初级）",
+        "content": (
+            "岗位职责：负责应用系统的日常部署与监控，使用 Docker 完成容器化环境搭建；"
+            "跟进线上告警与故障排查，编写运维脚本提升效率；维护 CI/CD 流程与服务器资源管理。\n"
+            "任职要求：1. 本科及以上学历，计算机相关专业，应届或 1 年以内经验；"
+            "2. 熟悉 Linux 常用命令与 Shell 脚本；3. 了解 Docker、Nginx、MySQL 的基本运维操作；"
+            "4. 了解 CI/CD 或 Kubernetes 者优先，有服务部署经验者优先。"
+        ),
+        "skills": ["Linux", "Shell", "Docker", "Nginx", "CI/CD", "Kubernetes"],
+    },
+
 ]
