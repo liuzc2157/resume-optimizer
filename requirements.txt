@@ -1,0 +1,20 @@
+langgraph>=0.2.0
+langchain-core>=0.3.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-dotenv>=1.0.0
+openai>=1.40.0
+pydantic>=2.7.0
+# ===== 新增：数据库 + 缓存 + 匹配 =====
+sqlalchemy>=2.0.0
+pymysql>=1.1.0
+jieba>=0.42.1
+# ===== 新增：JD 文件上传解析（txt/md/pdf/docx） =====
+python-multipart>=0.0.9   # FastAPI 接收 UploadFile 必需
+pypdf>=4.0.0              # PDF 文本抽取
+python-docx>=1.1.0        # DOCX 文本抽取（含表格）
+
+# ===== 可选：RAG 向量索引（FAISS 优先；不装则自动退化为纯 Python 余弦，零依赖可跑） =====
+# faiss-cpu>=1.8.0      # 装了即用真实 ANN 向量库；云端部署建议装上以提升大规模检索性能
+# pinecone>=3.0.0       # 可选托管向量库后端：设 VECTOR_BACKEND=pinecone + PINECONE_API_KEY 启用，支持 metadata 过滤召回
+

@@ -1,0 +1,23 @@
+# Docker 构建上下文排除（防止把本机环境/数据打进镜像）
+.venv/
+.venv_classify/
+__pycache__/
+*.py[cod]
+.env
+.env.local
+.env.production
+*.db
+*.sqlite
+*.log
+node_modules/
+.next/
+out/
+.git/
+.github/
+.idea/
+.vscode/
+_wtest
+local.db
+resume_optimizer.db
+backend.log
+install_err.log

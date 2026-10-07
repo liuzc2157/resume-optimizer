@@ -1,0 +1,35 @@
+{
+  "envId": "<你的CloudBase环境ID>",
+  "framework": {
+    "name": "resume-optimizer-backend",
+    "plugins": {
+      "backend": {
+        "use": "@cloudbase/framework-plugin-container",
+        "inputs": {
+          "serviceName": "resume-optimizer",
+          "dockerfile": "Dockerfile",
+          "buildDir": ".",
+          "containerPort": 8000,
+          "envVariables": {
+            "DB_HOST": "@@DB_HOST",
+            "DB_PORT": "3306",
+            "DB_USER": "@@DB_USER",
+            "DB_PASSWORD": "@@DB_PASSWORD",
+            "DB_NAME": "resume_optimizer",
+            "LLM_PROVIDER": "glm",
+            "GLM_API_KEY": "@@GLM_API_KEY",
+            "BACKEND_CORS_ORIGINS": "@@BACKEND_CORS_ORIGINS"
+          }
+        }
+      },
+      "web": {
+        "use": "@cloudbase/framework-plugin-website",
+        "inputs": {
+          "buildCommand": "cd frontend && npm install && npm run build",
+          "outputPath": "frontend/out",
+          "cloudPath": "/"
+        }
+      }
+    }
+  }
+}
