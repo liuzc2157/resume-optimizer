@@ -1,10 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // CloudBase「静态网站托管」需要 Next.js 产出 frontend/out 静态文件。
-  // 本项目前端为纯客户端渲染（数据全部走后端 API），适合静态导出。
-  output: "export",
+  // Railway 部署采用 Next.js standalone 模式：node 服务直接监听 Railway 注入的 PORT，
+  // 与后端部署机制同构（已验证可用），不再依赖 nginx 端口转发配置。
+  output: "standalone",
   reactStrictMode: true,
-  // 静态导出时关闭需要服务端的能力（本项目未用到，显式关闭更稳妥）
+  // 本项目为纯客户端渲染（数据全部走后端 API），无需图片优化
   images: { unoptimized: true },
 };
 
