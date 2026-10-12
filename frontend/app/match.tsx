@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "./markdown";
+import { ApiError, authFetch } from "./api";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
 
 interface MatchedJD {
   jd_id: number;
@@ -156,7 +157,7 @@ export default function Match() {
       const qs = new URLSearchParams();
       if (selCat) qs.set("position_category", selCat);
       if (selLevel) qs.set("experience_level", selLevel);
-      const res = await fetch(`${API_URL}/jds?${qs.toString()}`);
+      const res = await authFetch(`/jds?${qs.toString()}`);
       if (!res.ok) throw new Error(`/jds ${res.status}`);
       const data: JDItem[] = await res.json();
       setJds(data);
@@ -174,7 +175,7 @@ export default function Match() {
   // 缓存命中率（进入页面拉一次 + 每 12 秒自动刷新）
   const loadStats = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/cache/stats`);
+      const res = await authFetch("/cache/stats");
       if (res.ok) setStats(await res.json());
     } catch (error) {
       console.error(error);
@@ -198,7 +199,7 @@ export default function Match() {
       setRagLoading(true);
       setRagResult(null);
       try {
-        const res = await fetch(`${API_URL}/rag/retrieve`, {
+        const res = await authFetch("/rag/retrieve", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -213,7 +214,7 @@ export default function Match() {
         setRagResult(data);
       } catch (error) {
         console.error(error);
-        alert("RAG 语义检索失败，请确认后端已连接数据库");
+        alert(error instanceof ApiError ? error.message : "RAG 语义检索失败，请确认后端已连接数据库");
       } finally {
         setRagLoading(false);
       }
@@ -223,7 +224,7 @@ export default function Match() {
     setMatchLoading(true);
     setMatches([]);
     try {
-      const res = await fetch(`${API_URL}/match`, {
+      const res = await authFetch("/match", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -238,7 +239,7 @@ export default function Match() {
       setMatches(data.matches);
     } catch (error) {
       console.error(error);
-      alert("智能匹配失败，请确认后端已连接数据库");
+      alert(error instanceof ApiError ? error.message : "智能匹配失败，请确认后端已连接数据库");
     } finally {
       setMatchLoading(false);
     }
@@ -270,7 +271,7 @@ export default function Match() {
     setOptLoading(true);
     setResult(null);
     try {
-      const res = await fetch(`${API_URL}/optimize`, {
+      const res = await authFetch("/optimize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -288,7 +289,7 @@ export default function Match() {
       void loadStats(); // 优化后立即刷新命中率
     } catch (error) {
       console.error(error);
-      alert("优化失败，请重试");
+      alert(error instanceof ApiError ? error.message : "优化失败，请重试");
     } finally {
       setOptLoading(false);
     }
@@ -313,7 +314,7 @@ export default function Match() {
     try {
       const form = new FormData();
       form.append("file", file);
-      const res = await fetch(`${API_URL}/jds/upload`, {
+      const res = await authFetch("/jds/upload", {
         method: "POST",
         body: form,
       });
@@ -325,7 +326,7 @@ export default function Match() {
       await loadJds();
     } catch (error) {
       console.error(error);
-      alert("JD 上传失败，请确认文件内容或后端已连接");
+      alert(error instanceof ApiError ? error.message : "JD 上传失败，请确认文件内容或后端已连接");
     } finally {
       setUploading(false);
     }
@@ -341,7 +342,7 @@ export default function Match() {
     setCompareLoading(true);
     setCompareResult(null);
     try {
-      const res = await fetch(`${API_URL}/compare`, {
+      const res = await authFetch("/compare", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -355,7 +356,7 @@ export default function Match() {
       setCompareResult(data);
     } catch (error) {
       console.error(error);
-      alert("横向对比失败，请确认后端已连接数据库");
+      alert(error instanceof ApiError ? error.message : "横向对比失败，请确认后端已连接数据库");
     } finally {
       setCompareLoading(false);
     }

@@ -25,6 +25,8 @@ from typing import List, Optional
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from . import usage as usage_tracker
+
 load_dotenv()
 
 # 离线/本地验证开关：设置 MOCK_LLM=1 时返回固定文本，无需真实 API Key。
@@ -150,7 +152,47 @@ def get_client() -> OpenAI:
     return _client
 
 
-def call_llm(system: str, user: str, temperature: float = 0.3) -> str:
+def _record_response_usage(response, model: Optional[str] = None, usage_bucket: Optional[dict] = None) -> None:
+    """从 OpenAI 兼容响应里提取 usage 并累加进用量桶。
+
+    OpenAI SDK v3 返回对象含 .usage（None 或带 prompt_tokens/completion_tokens）；
+    免费/部分供应商可能不返回 usage，取不到就按 0 记录，不影响主流程。
+    """
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return
+    prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+    completion = int(getattr(usage, "completion_tokens", 0) or 0)
+    if prompt or completion:
+        usage_tracker.accumulate_usage(
+            usage_bucket,
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            model=model or LLM_MODEL,
+        )
+
+class LLMConnectionError(RuntimeError):
+    """LLM 供应商网络/连接失败（区别于鉴权、参数等业务错误）。
+
+    由 main.py 全局映射为 502 + 友好文案，避免把 httpx/OpenAI 的原始
+    Connection error 直接抛给前端。
+    """
+
+
+def _create_chat_completion(client, **kwargs):
+    """统一封装对话调用：把网络类错误翻译成 LLMConnectionError（附重试提示）。"""
+    from openai import APIConnectionError, APITimeoutError  # noqa: PLC0415
+
+    try:
+        return client.chat.completions.create(**kwargs)
+    except (APIConnectionError, APITimeoutError, ConnectionError, TimeoutError) as exc:  # noqa: BLE001
+        raise LLMConnectionError(
+            "无法连接 AI 服务（网络不通或供应商暂时不可用），请检查网络后重试；"
+            "本地开发可设置 MOCK_LLM=1 离线体验。"
+        ) from exc
+
+
+def call_llm(system: str, user: str, temperature: float = 0.3, usage_bucket: Optional[dict] = None) -> str:
     """调用当前供应商的对话接口，返回模型输出的文本。
 
     Args:
@@ -168,7 +210,8 @@ def call_llm(system: str, user: str, temperature: float = 0.3) -> str:
     if MOCK_LLM:
         return _mock_text(system, user)
     client = get_client()
-    response = client.chat.completions.create(
+    response = _create_chat_completion(
+        client,
         model=LLM_MODEL,
         messages=[
             {"role": "system", "content": system},
@@ -176,12 +219,16 @@ def call_llm(system: str, user: str, temperature: float = 0.3) -> str:
         ],
         temperature=temperature,
     )
+    _record_response_usage(response, usage_bucket=usage_bucket)
     content = response.choices[0].message.content
     return content.strip() if content else ""
 
 
 def call_llm_messages(
-    messages: List[dict], tools: Optional[List[dict]] = None, temperature: float = 0.3
+    messages: List[dict],
+    tools: Optional[List[dict]] = None,
+    temperature: float = 0.3,
+    usage_bucket: Optional[dict] = None,
 ):
     """带工具定义的对话调用，返回原始响应消息（可能包含 tool_calls）。
 
@@ -197,19 +244,22 @@ def call_llm_messages(
     kwargs: dict = dict(model=LLM_MODEL, messages=messages, temperature=temperature)
     if tools:
         kwargs["tools"] = tools
-    response = client.chat.completions.create(**kwargs)
+    response = _create_chat_completion(client, **kwargs)
+    _record_response_usage(response, usage_bucket=usage_bucket)
     return response.choices[0].message
 
 
-def call_llm_with_history(messages: List[dict], temperature: float = 0.3) -> str:
+def call_llm_with_history(messages: List[dict], temperature: float = 0.3, usage_bucket: Optional[dict] = None) -> str:
     """支持完整消息历史的调用方式，供未来多轮对话/人审节点扩展使用。"""
     if MOCK_LLM:
         return _mock_text(str(messages), "")
     client = get_client()
-    response = client.chat.completions.create(
+    response = _create_chat_completion(
+        client,
         model=LLM_MODEL,
         messages=messages,
         temperature=temperature,
     )
+    _record_response_usage(response, usage_bucket=usage_bucket)
     content = response.choices[0].message.content
     return content.strip() if content else ""

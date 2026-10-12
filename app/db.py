@@ -44,16 +44,26 @@ _engine: Engine | None = None
 _SessionLocal: sessionmaker | None = None
 
 
-def _build_engine() -> Engine:
-    """根据 DB_TYPE 构造引擎。"""
+def build_engine() -> Engine:
+    """根据 DB_TYPE 构造一个**独立**引擎（默认引擎外的额外连接池）。
+
+    业务侧用 get_engine() 的共享引擎；像 LangGraph Checkpointer 这类需要
+    与请求会话隔离连接池的场景，可调用本函数拿一个新引擎，避免与请求
+    事务在同一个 SQLite 连接上交叉，产生“transaction within transaction”或原生崩溃。
+    """
     if DB_TYPE == "sqlite":
-        from sqlalchemy.pool import StaticPool
+        # 内存库（:memory: 或空路径）用 StaticPool：单连接跨线程共享，适合测试注入；
+        # 文件库用 SingletonThreadPool：每个线程一条独立连接——LangGraph 会把节点
+        # 丢进线程池执行，若全进程共用一条 SQLite 连接，跨线程 INSERT 会因连接状态
+        # 串扰拿不到主键（FlushError / bad parameter）。
+        from sqlalchemy.pool import SingletonThreadPool, StaticPool
 
         logger.info("[db] 使用 SQLite 引擎 -> %s", DB_SQLITE_PATH)
+        use_static = DB_SQLITE_PATH in ("", ":memory:")
         return create_engine(
             f"sqlite:///{DB_SQLITE_PATH}",
             connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
+            poolclass=StaticPool if use_static else SingletonThreadPool,
             future=True,
         )
     # MySQL 8 默认 caching_sha2_password，PyMySQL 已支持；charset 必须 utf8mb4
@@ -80,10 +90,19 @@ def get_engine() -> Engine:
 
 
 def get_session() -> Session:
-    """FastAPI 依赖：产出一个数据库会话（调用方负责关闭）。"""
+    """产出一个数据库会话（调用方负责关闭）。"""
     if _SessionLocal is None:
         get_engine()
     return _SessionLocal()
+
+
+def db_session():
+    """FastAPI 依赖：产出一个数据库会话，请求结束后自动关闭。"""
+    s = get_session()
+    try:
+        yield s
+    finally:
+        s.close()
 
 
 def ensure_database() -> None:
@@ -141,14 +160,19 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "source": "source VARCHAR(32) NULL DEFAULT 'seed'",
         "embedding": "embedding TEXT NULL",
         "rag_text": "rag_text TEXT NULL",
+        "user_id": "user_id INTEGER NULL",
     },
     "analysis_cache": {
         "jd_ref": "jd_ref VARCHAR(64) NULL",
         "cache_version": "cache_version VARCHAR(64) NULL",
         "embedding": "embedding TEXT NULL",
+        "user_id": "user_id INTEGER NULL",
     },
     "cache_stats": {
         "semantic_hits": "semantic_hits BIGINT NOT NULL DEFAULT 0",
+    },
+    "saved_resumes": {
+        "sections": "sections JSON NULL",
     },
 }
 
@@ -209,3 +233,9 @@ def check_connection() -> bool:
     except Exception as exc:  # noqa: BLE001
         logger.warning("[db] 连接检查失败：%s", exc)
         return False
+
+
+# 兼容旧名（部分脚本直接引用 _build_engine）
+def _build_engine() -> Engine:
+    """兼容别名：等价于 build_engine()。"""
+    return build_engine()

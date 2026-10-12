@@ -1,51 +1,84 @@
-"""FastAPI 入口：暴露简历优化 Agent 的两个方向 + 新增缓存/匹配/JD 库能力。
+"""FastAPI 入口：暴露简历优化的两个方向 + 认证/配额/RAG 等能力。
 
 路由总览
 --------
+- POST /auth/register   注册（需同意隐私政策）
+- POST /auth/login      登录，返回 JWT
+- GET  /users/me        个人信息 + 配额 + 用量
+- DELETE /users/me      注销并清除全部个人数据
 - POST /optimize        任务型：一次性返回 得分/分析/改写，命中缓存时 cache_hit=True
-- POST /chat            对话型：多轮对话 Agent（带 Checkpointer 记忆），支持智能匹配
-- POST /match           智能匹配：按岗位类别+经验等级返回候选岗位 Top-N（支持 use_rag 走向量检索）
+- POST /chat            对话型：多轮对话（DB 持久化记忆），支持智能匹配
+- POST /match           智能匹配：按岗位类别+经验等级返回候选岗位 Top-N（支持 use_rag）
 - POST /rag/retrieve     RAG 向量检索：简历 -> 提炼 -> 召回最相似 Top-K 岗位 JD
-- POST /vector/reindex   强制重建 JD 向量索引
+- POST /vector/reindex   强制重建 JD 向量索引（仅管理员）
 - POST /classify        岗位自动分类：简历 -> 岗位类别/经验等级 + 置信度分布
-- GET  /jds             岗位库列表
-- POST /jds             新增岗位
+- GET  /jds             岗位库列表（种子 + 本人）
+- POST /jds             新增岗位（归属当前用户）
+- PUT  /jds/{id}        修改岗位
 - DELETE /jds/{id}      删除岗位
-- GET  /cache/stats     缓存命中统计（hits / misses / 命中率）
-- GET  /health          健康检查
+- POST /jds/upload      上传 JD 文件（txt/md/pdf/docx）
+- POST /resume/parse    解析简历文件为纯文本（txt/md/pdf/docx，不计配额）
+- GET/POST /resumes     简历库：列出 / 新建（每用户最多 3 份）
+- PUT/DELETE /resumes/{id} 覆盖 / 删除已保存简历
+- POST /compare         同一份简历 vs 多个岗位横向对比
+- GET  /cache/stats     缓存命中统计
+- GET  /health          健康检查（公开）
 
-RAG 向量库
+鉴权与配额
 ----------
-- 向量存于 JD 表的 embedding 列（JSON），rag_text 存清洗后的 JD 文本；
-  进程内向量索引默认 FAISS(IndexFlatIP)，不可用时退化为纯 Python 余弦，零额外服务即可跑。
-- 可切到托管向量库 Pinecone：设 VECTOR_BACKEND=pinecone + PINECONE_API_KEY，
-  向量与轻量 metadata（类别/等级/标题）存 Pinecone，支持服务端按类别/等级过滤召回；
-  索引维度在创建后不可改，维度不一致时 /vector/reindex 会给出清晰报错。
-- 入库用「入库切片预处理 Prompt」精简 JD，查询用「检索查询预处理 Prompt」提炼简历。
+- 除 /auth/* 与 /health 外，全部业务接口需要 Authorization: Bearer <token>。
+- 所有业务接口受「每分钟限流 + 每日配额」保护（见 rate_limit.py），
+  防刷接口把 LLM 费用打爆。
+- 每次调用写入 usage_log（token 用量 + 缓存命中），供配额/审计/未来计费使用。
 """
 
+import json
 import logging
 import os
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
 
 # 尽早加载 .env，保证 llm.py 读取 LLM_API_KEY 时环境变量已就绪
 load_dotenv()
 
+# 结构化日志：LOG_FORMAT=json 时输出 JSON 行（便于日志平台采集），默认人类可读。
+class _JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts": logging.Formatter.formatTime(self, record, "%Y-%m-%dT%H:%M:%S"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        # 保留异常堆栈：JSON 模式下 logger.exception 的 traceback 不能丢
+        if record.exc_info and record.exc_info[0] is not None:
+            payload["exc"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
+
+_formatter = _JsonFormatter() if os.getenv("LOG_FORMAT", "").strip().lower() == "json" else None
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s - %(message)s",
 )
+if _formatter is not None:
+    for handler in logging.getLogger().handlers:
+        handler.setFormatter(_formatter)
+
 logger = logging.getLogger(__name__)
 
+from .auth import router as auth_router  # noqa: E402
 from .cache import cache_store  # noqa: E402
 from .chat_graph import CHAT_SYSTEM_PROMPT, chat_agent  # noqa: E402
-from .db import check_connection, init_db  # noqa: E402
+from .db import check_connection, db_session, init_db  # noqa: E402
 from . import file_parser  # noqa: E402
+from .llm import LLMConnectionError  # noqa: E402
 from .graph import resume_agent  # noqa: E402  (需在 load_dotenv 之后导入)
 from .matching import (  # noqa: E402
     add_jd,
@@ -54,6 +87,8 @@ from .matching import (  # noqa: E402
     list_jds,
     update_jd,
 )
+from .rate_limit import enforce_rate_limit  # noqa: E402
+from .resumes import router as resumes_router  # noqa: E402
 from .schemas import (  # noqa: E402
     CacheStatsResponse,
     ChatRequest,
@@ -67,6 +102,7 @@ from .schemas import (  # noqa: E402
     JDUpdate,
     MatchRequest,
     MatchResponse,
+    ParseResumeResponse,
     MatchedJDSchema,
     OptimizeRequest,
     OptimizeResponse,
@@ -74,12 +110,27 @@ from .schemas import (  # noqa: E402
     RagRetrieveRequest,
     RagRetrieveResponse,
 )
+from .security import is_admin_user  # noqa: E402
 from . import rag, service  # noqa: E402
+from .usage import record_usage, usage_scope  # noqa: E402
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """启动时初始化数据库（建表 + 缓存统计单行 + 种子 JD）。"""
+    try:
+        init_db()
+        logger.info("简遇（Briefly）启动完成，数据库已就绪")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("数据库初始化失败（应用仍可启动，相关接口会报错）：%s", exc)
+    yield
+
 
 app = FastAPI(
-    title="AI Resume Optimizer Agent",
-    description="基于 LangGraph + MySQL + 缓存的简历优化 Agent（对话 / 任务双模式）",
-    version="0.2.0",
+    title="简遇 Briefly · AI 简历优化",
+    description="基于 LangGraph + MySQL + 缓存 + 账号配额的简历优化平台（对话 / 任务双模式）",
+    version="0.3.0",
+    lifespan=lifespan,
 )
 
 # CORS：默认放行本地前端；生产环境通过 BACKEND_CORS_ORIGINS 注入域名（逗号分隔）
@@ -94,9 +145,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth_router)
+app.include_router(resumes_router)
+
+@app.exception_handler(LLMConnectionError)
+async def llm_connection_error_handler(_request, exc: LLMConnectionError):
+    """LLM 网络/连接失败 -> 502 + 友好文案（不把 httpx 原始报错抛给前端）。"""
+    logger.warning("LLM 连接失败：%s", exc)
+    from fastapi.responses import JSONResponse  # noqa: PLC0415
+
+    return JSONResponse(status_code=502, content={"detail": str(exc)})
+
+
+
+@app.get("/health")
+def health() -> Dict[str, Any]:
+    """健康检查 + DB 探活（公开，供平台探活使用）。"""
+    return {"status": "ok", "db": "connected" if check_connection() else "unavailable"}
+
 
 @app.post("/optimize", response_model=OptimizeResponse)
-def optimize(req: OptimizeRequest) -> OptimizeResponse:
+def optimize(
+    req: OptimizeRequest,
+    user=Depends(enforce_rate_limit),
+    usage: dict = Depends(usage_scope),
+    s: Session = Depends(db_session),
+) -> OptimizeResponse:
     """任务型：匹配岗位 → 查缓存 →（未命中）LLM 分析改写。"""
     try:
         result = service.optimize_resume(
@@ -107,6 +181,8 @@ def optimize(req: OptimizeRequest) -> OptimizeResponse:
             experience_level=req.experience_level,
             save_jd=req.save_jd,
             intensity=req.intensity or "enhance",
+            user_id=user.id,
+            usage_bucket=usage,
         )
     except ValueError as exc:  # 业务校验失败（如无可用 JD）
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -114,6 +190,7 @@ def optimize(req: OptimizeRequest) -> OptimizeResponse:
         logger.exception("Optimize 执行失败")
         raise HTTPException(status_code=502, detail=f"Optimize 执行失败：{exc}") from exc
 
+    record_usage(s, user.id, "/optimize", cache_hit=result["cache_hit"], bucket=usage)
     return OptimizeResponse(
         score=result["score"],
         llm_score=result.get("llm_score"),
@@ -125,12 +202,17 @@ def optimize(req: OptimizeRequest) -> OptimizeResponse:
         matched_jd=result["matched_jd"],
         matches=result["matches"],
         breakdown=result.get("breakdown"),
-        messages=[f"cache_hit={result['cache_hit']} source={result['cache_source']}"],
+        messages=result.get("messages", []),
     )
 
 
 @app.post("/match", response_model=MatchResponse)
-def match(req: MatchRequest) -> MatchResponse:
+def match(
+    req: MatchRequest,
+    user=Depends(enforce_rate_limit),
+    usage: dict = Depends(usage_scope),
+    s: Session = Depends(db_session),
+) -> MatchResponse:
     """智能匹配：use_rag=False 走关键词重叠+技能加权；use_rag=True 走 RAG 向量检索。"""
     try:
         result = service.match_resume(
@@ -139,10 +221,12 @@ def match(req: MatchRequest) -> MatchResponse:
             experience_level=req.experience_level,
             top_n=req.top_n,
             use_rag=req.use_rag,
+            user_id=user.id,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Match 执行失败")
         raise HTTPException(status_code=502, detail=f"Match 执行失败：{exc}") from exc
+    record_usage(s, user.id, "/match", cache_hit=False, bucket=usage)
     return MatchResponse(
         matches=[MatchedJDSchema(**m) for m in result["matches"]],
         mode=result["mode"],
@@ -151,13 +235,17 @@ def match(req: MatchRequest) -> MatchResponse:
 
 
 @app.post("/rag/retrieve", response_model=RagRetrieveResponse)
-def rag_retrieve_endpoint(req: RagRetrieveRequest) -> RagRetrieveResponse:
-    """RAG 检索：简历 -> 提炼 -> 向量召回最相似的 Top-K 岗位 JD。
-
-    返回的 items.rag_text 是 JD 经「入库切片预处理」后的精简文本，便于解释召回原因。
-    """
+def rag_retrieve_endpoint(
+    req: RagRetrieveRequest,
+    user=Depends(enforce_rate_limit),
+    usage: dict = Depends(usage_scope),
+    s: Session = Depends(db_session),
+) -> RagRetrieveResponse:
+    """RAG 检索：简历 -> 提炼 -> 向量召回最相似的 Top-K 岗位 JD。"""
     try:
-        result = rag.rag_retrieve(req.resume_text, top_k=req.top_k, category=req.category, level=req.level)
+        result = rag.rag_retrieve(
+            req.resume_text, top_k=req.top_k, category=req.category, level=req.level, user_id=user.id
+        )
         return RagRetrieveResponse(
             query_text=result["query_text"],
             items=[RagItem(**it) for it in result["items"]],
@@ -168,10 +256,17 @@ def rag_retrieve_endpoint(req: RagRetrieveRequest) -> RagRetrieveResponse:
 
 
 @app.post("/vector/reindex")
-def vector_reindex() -> Dict[str, Any]:
-    """强制重建 JD 向量索引（新增/修改 JD 后手动刷新，或 embedder 配置变更后使用）。"""
+def vector_reindex(
+    user=Depends(enforce_rate_limit),
+    usage: dict = Depends(usage_scope),
+    s: Session = Depends(db_session),
+) -> Dict[str, Any]:
+    """强制重建 JD 向量索引（仅管理员）。"""
+    if not is_admin_user(user):
+        raise HTTPException(status_code=403, detail="仅管理员可执行重建索引")
     try:
         n = rag.reindex_jd_vectors()
+        record_usage(s, user.id, "/vector/reindex", cache_hit=False, bucket=usage)
         return {"indexed": n, "status": "ok"}
     except Exception as exc:  # noqa: BLE001
         logger.exception("向量索引重建失败")
@@ -179,12 +274,13 @@ def vector_reindex() -> Dict[str, Any]:
 
 
 @app.post("/classify", response_model=ClassifyResponse)
-def classify(req: ClassifyRequest) -> ClassifyResponse:
-    """岗位自动分类：把简历归入岗位类别 + 经验等级，并返回可解释的置信度分布。
-
-    纯关键词判定（与 JD 自动归类同源），不调 LLM、零成本；可在智能匹配前先预判
-    候选人方向，或让用户点选分类条直接筛选匹配。
-    """
+def classify(
+    req: ClassifyRequest,
+    user=Depends(enforce_rate_limit),
+    usage: dict = Depends(usage_scope),
+    s: Session = Depends(db_session),
+) -> ClassifyResponse:
+    """岗位自动分类：把简历归入岗位类别 + 经验等级，并返回可解释的置信度分布。"""
     try:
         return ClassifyResponse(**service.classify_resume(req.resume_text))
     except Exception as exc:  # noqa: BLE001
@@ -193,10 +289,20 @@ def classify(req: ClassifyRequest) -> ClassifyResponse:
 
 
 @app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest) -> ChatResponse:
-    """对话模式：多轮简历优化 Agent（支持智能匹配与缓存）。"""
-    thread_id = req.thread_id or str(uuid.uuid4())
-    config = {"configurable": {"thread_id": thread_id}}
+def chat(
+    req: ChatRequest,
+    user=Depends(enforce_rate_limit),
+    usage: dict = Depends(usage_scope),
+    s: Session = Depends(db_session),
+) -> ChatResponse:
+    """对话模式：多轮简历优化（DB 持久化记忆，按用户隔离会话）。
+
+    thread_id 以「用户id:会话id」命名空间存储，保证不同用户的会话互不可见；
+    返回给客户端的仍是原始 thread_id（续聊时携带即可）。
+    """
+    raw_thread = req.thread_id or str(uuid.uuid4())
+    thread_id = f"{user.id}:{raw_thread}"
+    config = {"configurable": {"thread_id": thread_id, "user_id": user.id, "usage_bucket": usage}}
 
     init_state: Dict[str, Any] = {"messages": []}
     if not chat_agent.get_state(config).values:
@@ -219,16 +325,16 @@ def chat(req: ChatRequest) -> ChatResponse:
     try:
         state = chat_agent.invoke(init_state, config=config)
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Chat Agent 执行失败")
-        raise HTTPException(status_code=502, detail=f"Chat Agent 执行失败：{exc}") from exc
+        logger.exception("Chat 执行失败")
+        raise HTTPException(status_code=502, detail=f"Chat 执行失败：{exc}") from exc
 
     reply = next(
         (m["content"] for m in reversed(state["messages"]) if m["role"] == "assistant"),
-        "（Agent 未返回内容，请重试）",
+        "（未返回内容，请重试）",
     )
-    # 从 state 读取本轮是否命中缓存（由工具节点写入）
     cache_hit = bool(state.get("last_cache_hit", False))
-    return ChatResponse(thread_id=thread_id, reply=reply, cache_hit=cache_hit)
+    record_usage(s, user.id, "/chat", cache_hit=cache_hit, bucket=usage)
+    return ChatResponse(thread_id=raw_thread, reply=reply, cache_hit=cache_hit)
 
 
 # ---------------- JD 岗位库管理 ----------------
@@ -236,13 +342,19 @@ def chat(req: ChatRequest) -> ChatResponse:
 def get_jds(
     position_category: str | None = Query(None),
     experience_level: str | None = Query(None),
+    user=Depends(enforce_rate_limit),
+    s: Session = Depends(db_session),
 ):
-    """岗位库列表（可按维度过滤）。"""
-    return [_jd_to_schema(j) for j in list_jds(position_category, experience_level)]
+    """岗位库列表（种子岗位 + 当前用户自己保存的岗位）。"""
+    return [_jd_to_schema(j) for j in list_jds(position_category, experience_level, user_id=user.id)]
 
 
 @app.post("/jds", response_model=JDSchema, status_code=201)
-def create_jd(req: JDCreate) -> JDSchema:
+def create_jd(
+    req: JDCreate,
+    user=Depends(enforce_rate_limit),
+    s: Session = Depends(db_session),
+) -> JDSchema:
     jd = add_jd(
         position_category=req.position_category,
         experience_level=req.experience_level,
@@ -250,20 +362,13 @@ def create_jd(req: JDCreate) -> JDSchema:
         content=req.content,
         skills=req.skills,
         source=req.source or "seed",
+        user_id=user.id,
     )
     try:
         rag.upsert_jd(jd.id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("向量库同步新增 JD#%s 失败：%s", jd.id, exc)
-    return JDSchema(
-        id=jd.id,
-        position_category=jd.position_category,
-        experience_level=jd.experience_level,
-        title=jd.title,
-        content=jd.content,
-        skills=jd.skills,
-        source=jd.source,
-    )
+    return _jd_to_schema(jd)
 
 
 def _jd_to_schema(jd) -> JDSchema:
@@ -279,8 +384,17 @@ def _jd_to_schema(jd) -> JDSchema:
 
 
 @app.put("/jds/{jd_id}", response_model=JDSchema)
-def modify_jd(jd_id: int, req: JDUpdate) -> JDSchema:
-    """修改已保存的岗位（用户可对自动入库的 JD 做修正）。"""
+def modify_jd(
+    jd_id: int,
+    req: JDUpdate,
+    user=Depends(enforce_rate_limit),
+    s: Session = Depends(db_session),
+) -> JDSchema:
+    """修改已保存的岗位（仅本人创建的岗位可改；种子岗位只读）。"""
+    from .matching import get_jd
+
+    if (jd := get_jd(jd_id, user_id=user.id)) is None or jd.user_id is None:
+        raise HTTPException(status_code=403, detail="只能修改自己创建的岗位（种子岗位只读）")
     jd = update_jd(
         jd_id,
         position_category=req.position_category,
@@ -304,11 +418,10 @@ async def upload_jd(
     title: Optional[str] = Form(None, description="岗位名称，不填则自动取首行"),
     position_category: Optional[str] = Form(None, description="岗位类别，不填则自动推断"),
     experience_level: Optional[str] = Form(None, description="经验等级，不填则自动推断"),
+    user=Depends(enforce_rate_limit),
+    s: Session = Depends(db_session),
 ) -> JDSchema:
-    """上传 JD 文件 → 解析文本 → 保存进岗位库（source=user）。
-
-    保存后即可复用：下次不用再传文件，智能匹配也能检索到它。
-    """
+    """上传 JD 文件 → 解析文本 → 保存进当前用户的岗位库。"""
     raw = await file.read()
     if not raw:
         raise HTTPException(status_code=400, detail="文件为空")
@@ -330,6 +443,7 @@ async def upload_jd(
         experience_level=experience_level,
         title=title,
         source="user",
+        user_id=user.id,
     )
     try:
         rag.upsert_jd(jd.id)
@@ -338,28 +452,62 @@ async def upload_jd(
     return _jd_to_schema(jd)
 
 
-@app.post("/compare", response_model=CompareResponse)
-def compare(req: CompareRequest) -> CompareResponse:
-    """同一份简历 vs 多个岗位，横向对比「投哪个最合适」。
 
-    默认只算确定性 ATS 分（不调 LLM，快且零成本）；需要 AI 评分时传 with_llm=true。
-    """
+@app.post("/resume/parse", response_model=ParseResumeResponse)
+async def parse_resume(
+    file: UploadFile = File(..., description="简历文件，支持 txt/md/pdf/docx"),
+    user=Depends(enforce_rate_limit),
+) -> ParseResumeResponse:
+    """解析简历文件为纯文本（本地解析，不调用 LLM、不消耗配额）。"""
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="文件为空")
+    try:
+        content = file_parser.extract_text(file.filename or "", raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    content = (content or "").strip()
+    if len(content) < 10:
+        raise HTTPException(
+            status_code=400,
+            detail="解析出的文本过短，请确认文件内容，或直接粘贴简历文本",
+        )
+    return ParseResumeResponse(filename=file.filename or "", text=content)
+
+@app.post("/compare", response_model=CompareResponse)
+def compare(
+    req: CompareRequest,
+    user=Depends(enforce_rate_limit),
+    usage: dict = Depends(usage_scope),
+    s: Session = Depends(db_session),
+) -> CompareResponse:
+    """同一份简历 vs 多个岗位，横向对比「投哪个最合适」。"""
     try:
         result = service.compare_resume(
             resume_text=req.resume_text,
             jd_ids=req.jd_ids,
             with_llm=req.with_llm,
+            user_id=user.id,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Compare 执行失败")
         raise HTTPException(status_code=502, detail=f"Compare 执行失败：{exc}") from exc
+    record_usage(s, user.id, "/compare", cache_hit=False, bucket=usage)
     return CompareResponse(**result)
 
 
 @app.delete("/jds/{jd_id}", status_code=204)
-def remove_jd(jd_id: int) -> None:
-    if not delete_jd(jd_id):
-        raise HTTPException(status_code=404, detail="岗位不存在")
+def remove_jd(
+    jd_id: int,
+    user=Depends(enforce_rate_limit),
+    s: Session = Depends(db_session),
+) -> None:
+    """删除岗位（仅本人创建的岗位可删；种子岗位不可删）。"""
+    from .matching import get_jd
+
+    if (jd := get_jd(jd_id, user_id=user.id)) is None or jd.user_id is None:
+        raise HTTPException(status_code=403, detail="只能删除自己创建的岗位（种子岗位只读）")
+    delete_jd(jd_id)
     try:
         rag.delete_jd(jd_id)
     except Exception as exc:  # noqa: BLE001
@@ -368,7 +516,10 @@ def remove_jd(jd_id: int) -> None:
 
 # ---------------- 缓存命中统计 ----------------
 @app.get("/cache/stats", response_model=CacheStatsResponse)
-def cache_stats() -> CacheStatsResponse:
+def cache_stats(
+    user=Depends(enforce_rate_limit),
+    s: Session = Depends(db_session),
+) -> CacheStatsResponse:
     view = cache_store.stats()
     return CacheStatsResponse(
         hits=view.hits,
@@ -380,19 +531,3 @@ def cache_stats() -> CacheStatsResponse:
         threshold=view.threshold,
         semantic_enabled=view.semantic_enabled,
     )
-
-
-@app.get("/health")
-def health() -> Dict[str, Any]:
-    """健康检查 + DB 探活，供 CloudBase 等平台探活使用。"""
-    return {"status": "ok", "db": "connected" if check_connection() else "unavailable"}
-
-
-@app.on_event("startup")
-def on_startup() -> None:
-    """启动时初始化数据库（建表 + 缓存统计单行）。"""
-    try:
-        init_db()
-        logger.info("Resume Optimizer Agent 启动完成，数据库已就绪")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("数据库初始化失败（应用仍可启动，相关接口会报错）：%s", exc)

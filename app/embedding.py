@@ -142,6 +142,24 @@ class APIEmbedder:
         return list(resp.data[0].embedding)
 
 
+
+class ResilientEmbedder:
+    """API 向量 + 本地哈希双保险：接口不可用/限流时单次回退本地向量。"""
+
+    def __init__(self, primary, fallback) -> None:
+        self._primary = primary
+        self._fallback = fallback
+
+    def embed(self, text: str) -> List[float]:
+        try:
+            vec = self._primary.embed(text)
+            if vec and any(vec):
+                return vec
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[embedding] API 向量失败，回退本地：%s", exc)
+        return self._fallback.embed(text)
+
+
 _embedder = None
 
 
@@ -168,8 +186,11 @@ def get_embedder():
 
     if base_url and api_key:
         try:
-            _embedder = APIEmbedder(base_url, api_key, model)
-            logger.info("[embedding] 使用 API embedder: %s @ %s", model, base_url)
+            _embedder = ResilientEmbedder(
+                APIEmbedder(base_url, api_key, model),
+                LocalEmbedder(dim=int(os.getenv("EMBEDDING_DIM", "256"))),
+            )
+            logger.info("[embedding] 使用 API embedder（失败自动回退本地）: %s @ %s", model, base_url)
             return _embedder
         except Exception as exc:  # noqa: BLE001
             logger.warning("[embedding] API embedder 初始化失败，回退本地：%s", exc)

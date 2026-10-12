@@ -381,12 +381,15 @@ def build_or_load_store(force: bool = False):
 
 
 def rag_retrieve(resume_text: str, top_k: int = 5, category: Optional[str] = None,
-                 level: Optional[str] = None) -> dict:
+                 level: Optional[str] = None, user_id: Optional[int] = None) -> dict:
     """RAG 检索：简历 -> 提炼 -> 向量 -> 召回 Top-K 相似 JD（支持类别/等级过滤）。
 
     返回 {query_text, items:[{jd_id, title, position_category, experience_level,
     similarity, rag_text}]}，items 字段与 MatchedJDSchema 兼容（可直接喂 /match 前端）。
     rag_text 统一从 JD 表按 jd_id 取（Pinecone 不存正文，避免 metadata 超限）。
+
+    可见性：向量索引是全局共享的，但召回结果会按「种子岗位 + 当前用户自己的岗位」
+    过滤，保证不会把其他用户的私有 JD 召回展示（隐私隔离）。
     """
     store = build_or_load_store()
     query_text = extract_resume_query(resume_text)
@@ -394,19 +397,26 @@ def rag_retrieve(resume_text: str, top_k: int = 5, category: Optional[str] = Non
     filt = _build_filter(category, level)
     raw = store.search(qvec, top_k, filt)
 
-    jd_ids = [jid for jid, _, _ in raw]
+    candidate_ids = [jid for jid, _, _ in raw]
+    visible_ids: set = set()
     rag_texts: dict = {}
-    if jd_ids:
+    if candidate_ids:
         s = get_session()
         try:
-            rows = s.execute(select(JD.id, JD.rag_text, JD.content).where(JD.id.in_(jd_ids))).all()
-            for rid, rtext, rcontent in rows:
-                rag_texts[rid] = rtext or rcontent or ""
+            rows = s.execute(
+                select(JD.id, JD.user_id, JD.rag_text, JD.content).where(JD.id.in_(candidate_ids))
+            ).all()
+            for rid, owner, rtext, rcontent in rows:
+                if owner is None or owner == user_id:
+                    visible_ids.add(rid)
+                    rag_texts[rid] = rtext or rcontent or ""
         finally:
             s.close()
 
     items = []
     for jd_id, meta, score in raw:
+        if jd_id not in visible_ids:
+            continue  # 他人私有岗位，跳过
         items.append(
             {
                 "jd_id": jd_id,

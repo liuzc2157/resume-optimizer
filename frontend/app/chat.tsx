@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Markdown from "./markdown";
+import { ApiError, authFetch } from "./api";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -16,7 +17,7 @@ interface ChatSession {
   messages: ChatMessage[];
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
 const CHAT_HISTORY_KEY = "resume-optimizer-chat-history";
 const CHAT_HISTORY_LIMIT = 20;
 
@@ -50,7 +51,7 @@ function loadSessions(): ChatSession[] {
 const WELCOME: ChatMessage = {
   role: "assistant",
   content:
-    "你好！我是简历优化 Agent 🤖\n\n你可以直接把简历发给我，再发目标岗位的 JD，我会帮你分析匹配度并给出改写建议。也可以随时问我简历写作的问题。",
+    "你好！我是简遇 🤖\n\n你可以直接把简历发给我，再发目标岗位的 JD，我会帮你分析匹配度并给出改写建议。也可以随时问我简历写作的问题。",
 };
 
 export default function Chat() {
@@ -111,7 +112,7 @@ export default function Chat() {
     setLoading(true);
 
     try {
-      const res = await fetch(`${API_URL}/chat`, {
+      const res = await authFetch("/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -137,7 +138,7 @@ export default function Chat() {
       console.error(error);
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: "抱歉，出了点问题，请重试。" },
+        { role: "assistant", content: error instanceof ApiError ? error.message : "抱歉，出了点问题，请重试。" },
       ]);
     } finally {
       setLoading(false);
@@ -222,7 +223,7 @@ export default function Chat() {
             className="rounded-lg border border-indigo-200/70 bg-white/80 p-2 text-sm outline-none transition focus:border-violet-500 focus:ring-2 focus:ring-violet-200"
           />
           <p className="col-span-2 text-[10px] text-slate-400">
-            设定后，对话 Agent 在缺简历/JD 时可按岗位与经验智能匹配；命中缓存时回复会标注「⚡ 缓存命中」。
+            设定后，对话助手在缺简历/JD 时可按岗位与经验智能匹配；命中缓存时回复会标注「⚡ 缓存命中」。
           </p>
         </div>
       )}
@@ -343,7 +344,7 @@ export default function Chat() {
       </div>
 
       <p className="mt-2 text-center text-xs text-slate-400">
-        对话记录保存在浏览器本地；后端服务重启后，继续旧对话时请重新提供简历/JD
+        对话摘要保存在浏览器本地；后端会按 thread_id 在数据库中持久化记忆，登录同一账号、选中旧对话即可无缝续聊
       </p>
     </div>
   );

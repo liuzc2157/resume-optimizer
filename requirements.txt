@@ -18,3 +18,6 @@ python-docx>=1.1.0        # DOCX 文本抽取（含表格）
 # faiss-cpu>=1.8.0      # 装了即用真实 ANN 向量库；云端部署建议装上以提升大规模检索性能
 # pinecone>=3.0.0       # 可选托管向量库后端：设 VECTOR_BACKEND=pinecone + PINECONE_API_KEY 启用，支持 metadata 过滤召回
 
+
+# ===== 认证 / 配额 =====
+pyjwt>=2.8.0            # JWT 访问令牌（用户鉴权）

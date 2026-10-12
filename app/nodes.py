@@ -91,7 +91,7 @@ def analyze_node(state: "AgentState") -> Dict[str, Any]:
     }
 
 
-def analyze_resume(resume_text: str, jd_text: str) -> tuple[str, int]:
+def analyze_resume(resume_text: str, jd_text: str, usage_bucket=None) -> tuple[str, int]:
     """纯函数版匹配度分析：给定简历与 JD，返回 (分析报告, 得分)。
 
     供 LangGraph 节点与缓存服务层复用，避免逻辑重复。
@@ -101,7 +101,7 @@ def analyze_resume(resume_text: str, jd_text: str) -> tuple[str, int]:
         f"【目标岗位 JD】\n{jd_text}\n\n"
         "请按系统要求的格式输出匹配度分析报告，第一行给出 SCORE。"
     )
-    analysis = call_llm(ANALYZE_SYSTEM_PROMPT, user_prompt)
+    analysis = call_llm(ANALYZE_SYSTEM_PROMPT, user_prompt, usage_bucket=usage_bucket)
 
     # 从 LLM 输出中提取分数：优先匹配「SCORE: 数字」，兜底取全文第一个 1-100 的数字
     score = _extract_score(analysis)
@@ -144,7 +144,7 @@ def rewrite_node(state: "AgentState") -> Dict[str, Any]:
     }
 
 
-def rewrite_resume(resume_text: str, jd_text: str, analysis: str, intensity: str = "enhance") -> str:
+def rewrite_resume(resume_text: str, jd_text: str, analysis: str, intensity: str = "enhance", usage_bucket=None) -> str:
     """纯函数版改写：给定简历、JD 与分析报告，返回改写建议文本。
 
     intensity 三档：light=轻推微调 / enhance=关键词增强 / rewrite=整篇重写，
@@ -160,7 +160,7 @@ def rewrite_resume(resume_text: str, jd_text: str, analysis: str, intensity: str
         f"【匹配度分析报告】\n{analysis}\n\n"
         "请基于以上分析输出改写建议和优化后的段落。"
     )
-    return call_llm(system_prompt, user_prompt)
+    return call_llm(system_prompt, user_prompt, usage_bucket=usage_bucket)
 
 
 def format_node(state: "AgentState") -> Dict[str, Any]:

@@ -131,12 +131,16 @@ class CacheStore:
         return hashlib.md5(normalize(text).encode("utf-8")).hexdigest()
 
     @staticmethod
-    def _cache_key(resume_hash: str, jd_ref: str, version: str) -> str:
+    def _cache_key(resume_hash: str, jd_ref: str, version: str, user_id: Optional[int] = None) -> str:
         """jd_ref 可以是 'jd:<id>'（库内岗位）或 'text:<md5>'（用户直传 JD 文本）。
 
         版本编进键里：版本一变，键就变，旧条目自然不再命中。
+        user_id 编进键里：缓存按用户隔离——同一份简历的分析结果只在
+        该用户内复用，绝不跨用户命中（简历是个人信息，跨用户命中=泄露）。
         """
-        return hashlib.md5(f"{version}|{resume_hash}|{jd_ref}".encode("utf-8")).hexdigest()
+        return hashlib.md5(
+            f"{version}|{resume_hash}|{jd_ref}|{user_id}".encode("utf-8")
+        ).hexdigest()
 
     # ---------- 内存层 ----------
     def _memory_get(self, key: str) -> Optional[CacheResult]:
@@ -156,12 +160,13 @@ class CacheStore:
 
     # ---------- 语义层 ----------
     def _semantic_lookup(
-        self, jd_ref: str, version: str, emb: List[float], s
+        self, jd_ref: str, version: str, emb: List[float], s, user_id: Optional[int] = None
     ) -> Tuple[Optional[AnalysisCache], float]:
         """在**同一 jd_ref 分区内**找最相似的缓存条目。
 
         返回 (行, 相似度)；无达标结果返回 (None, 0.0)。
-        分区检索是防误命中的第一道闸——跨岗位比较毫无意义且危险。
+        分区检索是防误命中的第一道闸——跨岗位比较毫无意义且危险；
+        同时限定在同一 user_id 内，防跨用户误命中（简历隐私）。
         """
         if not _SEMANTIC_ENABLED:
             return None, 0.0
@@ -172,6 +177,7 @@ class CacheStore:
                     AnalysisCache.jd_ref == jd_ref,
                     AnalysisCache.cache_version == version,
                     AnalysisCache.embedding.isnot(None),
+                    AnalysisCache.user_id == user_id,
                 )
                 .order_by(AnalysisCache.id.desc())
                 .limit(_SEMANTIC_SCAN)
@@ -202,6 +208,7 @@ class CacheStore:
         experience_level: Optional[str],
         compute: Callable[[], Dict[str, object]],
         jd_id: Optional[int] = None,
+        user_id: Optional[int] = None,
     ) -> CacheResult:
         """查缓存；命中直接返回，未命中调用 compute() 并落库。
 
@@ -215,7 +222,7 @@ class CacheStore:
         """
         version = cache_version()
         resume_hash = self._hash(resume_text)
-        key = self._cache_key(resume_hash, jd_ref, version)
+        key = self._cache_key(resume_hash, jd_ref, version, user_id)
 
         # 1) L1 内存精确命中
         cached = self._memory_get(key)
@@ -265,7 +272,7 @@ class CacheStore:
                 emb = []
 
             if emb:
-                sim_row, sim = self._semantic_lookup(jd_ref, version, emb, s)
+                sim_row, sim = self._semantic_lookup(jd_ref, version, emb, s, user_id)
                 if sim_row is not None:
                     s.execute(
                         update(AnalysisCache)
@@ -332,6 +339,7 @@ class CacheStore:
                     cache_version=version,
                     embedding=emb_json,
                     jd_id=jd_id,
+                    user_id=user_id,
                     position_category=position_category,
                     experience_level=experience_level,
                     score=score,

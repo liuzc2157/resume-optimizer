@@ -243,3 +243,102 @@ class CacheStatsResponse(BaseModel):
     total: int
     threshold: float = Field(0.95, description="语义命中阈值")
     semantic_enabled: bool = Field(True, description="语义缓存是否开启")
+
+
+# ---------------- 认证 / 账号 ----------------
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=2, max_length=64, description="用户名（唯一）")
+    password: str = Field(..., min_length=1, max_length=128, description="密码（业务层校验至少 6 位）")
+    email: str = Field(..., description="邮箱（必填，一个邮箱只能注册一个账号；需先通过 /auth/send-code 获取验证码）")
+    code: str = Field(..., min_length=6, max_length=8, description="邮箱验证码（6 位数字，10 分钟内有效，一次性）")
+    consent: bool = Field(
+        False,
+        description="是否同意《隐私政策》。必须为 True 才能注册——简历属于个人信息，"
+        "平台只用于优化目的、支持随时删除。",
+    )
+
+
+class LoginRequest(BaseModel):
+    account: str = Field(..., description="用户名或邮箱（均可登录）")
+    password: str = Field(..., description="密码")
+
+
+class SendCodeRequest(BaseModel):
+    """请求发送邮箱验证码（注册 / 找回密码共用）。"""
+
+    email: str = Field(..., description="邮箱地址")
+    purpose: str = Field("register", description="用途：register=注册 / reset=找回密码")
+
+
+class SendCodeResponse(BaseModel):
+    ok: bool = True
+    dev: bool = Field(False, description="True 表示 SMTP 未配置的开发模式，验证码直接返回（生产不发）")
+    dev_code: Optional[str] = Field(None, description="仅 dev=True 时返回的验证码，用于本地联调")
+    expires_in: int = Field(600, description="验证码有效期（秒）")
+    cooldown_seconds: int = Field(0, description="距下次可发送还需等待的秒数（0 表示立即可发）")
+
+
+class ResetPasswordRequest(BaseModel):
+    email: str = Field(..., description="注册时使用的邮箱")
+    code: str = Field(..., min_length=6, max_length=8, description="发送到邮箱的验证码")
+    new_password: str = Field(..., min_length=6, max_length=128, description="新密码（至少 6 位）")
+
+
+class UserProfile(BaseModel):
+    id: int
+    username: str
+    email: Optional[str] = None
+    plan: str = Field("free", description="free / pro")
+    daily_quota: int = Field(0, description="每日配额（0=按套餐默认）")
+    consent_at: Optional[Any] = None
+    created_at: Optional[Any] = None
+
+
+class TokenResponse(BaseModel):
+    token: str = Field(..., description="JWT 访问令牌，请求头 Authorization: Bearer <token>")
+    token_type: str = "bearer"
+    user: UserProfile
+
+
+class UserMeResponse(BaseModel):
+    profile: UserProfile
+    quota: dict = Field(default_factory=dict, description="{daily, remaining, unlimited}")
+    usage: dict = Field(default_factory=dict, description="用量汇总（今天/累计/token）")
+
+
+# ---------------- 简历文件解析 ----------------
+class ParseResumeResponse(BaseModel):
+    filename: str = Field(..., description="上传的文件名")
+    text: str = Field(..., description="解析出的纯文本")
+
+
+# ---------------- 简历库（每用户最多 3 份） ----------------
+class ResumeCreate(BaseModel):
+    name: Optional[str] = Field(None, description="简历名称，如「主简历」「后端方向」")
+    content: str = Field(..., min_length=1, description="简历全文（结构化字段渲染后或直接粘贴的文本）")
+    sections: Optional[dict] = Field(
+        None,
+        description="结构化简历字段：basic/education/work/projects/skills/certificates/summary。"
+        "content 由前端从 sections 渲染生成；老数据没有 sections 也能正常用。",
+    )
+    position_category: Optional[str] = Field(None, description="岗位类别（可选）")
+    experience_level: Optional[str] = Field(None, description="经验等级（可选）")
+
+
+class ResumeUpdate(BaseModel):
+    name: Optional[str] = Field(None, description="简历名称")
+    content: Optional[str] = Field(None, min_length=1, description="简历全文")
+    sections: Optional[dict] = Field(None, description="结构化简历字段（覆盖式更新，传 null 不清空）")
+    position_category: Optional[str] = Field(None, description="岗位类别（可选）")
+    experience_level: Optional[str] = Field(None, description="经验等级（可选）")
+
+
+class ResumeSchema(BaseModel):
+    id: int
+    name: Optional[str] = None
+    content: str
+    sections: Optional[Any] = None
+    position_category: Optional[str] = None
+    experience_level: Optional[str] = None
+    created_at: Optional[Any] = None
+    updated_at: Optional[Any] = None

@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Markdown from "./markdown";
+import { ApiError, apiGet, authFetch } from "./api";
 import { HISTORY_LIMIT, HistoryItem, excerpt } from "./history-utils";
 
 interface MatchedJD {
@@ -36,6 +37,12 @@ interface OptimizeResponse {
   messages: string[];
 }
 
+
+interface ResumeItem {
+  id: number;
+  name: string | null;
+  content: string;
+}
 export interface RestoreRequest {
   item: HistoryItem;
   seq: number;
@@ -47,7 +54,7 @@ interface Props {
   restoreRequest: RestoreRequest | null;
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
 
 // 三档改写强度：只影响改写 prompt，缓存互相隔离
 const INTENSITY_OPTIONS = [
@@ -55,6 +62,36 @@ const INTENSITY_OPTIONS = [
   { key: "enhance", label: "增强", desc: "强化关键词与量化成果" },
   { key: "rewrite", label: "重写", desc: "整篇重构，最大贴合 JD" },
 ] as const;
+// 一键体验：参考 OpenResume 的示例数据填充，快速跑通全流程
+const SAMPLE_RESUME = `张三
+求职意向：后端开发工程师（Python）
+
+工作经历
+2021.07 - 至今 某科技有限公司 · 后端工程师
+- 负责订单系统开发与维护，日请求量峰值约 200 万
+- 主导支付模块重构，接口响应时间从 800ms 降至 120ms
+- 技术栈：Python / FastAPI / MySQL / Redis / Docker
+
+2020.06 - 2021.06 某互联网公司 · 后端实习生
+- 参与用户中心微服务拆分，支撑 5 万并发登录
+
+项目经历
+订单中台（2022.03 - 2022.12）
+- 设计异步对账流程，对账异常率下降 60%
+
+技能
+Python、FastAPI、Flask、MySQL、Redis、RabbitMQ、Docker、Git、Linux`;
+
+const SAMPLE_JD = `岗位名称：后端开发工程师（Python）
+岗位职责：
+1. 负责核心业务系统的设计、开发与维护，保障系统稳定性与可用性
+2. 与产品、前端协作完成需求评审与技术方案设计
+3. 参与服务性能优化，持续提升接口响应速度与并发能力
+任职要求：
+1. 本科及以上学历，计算机相关专业，2 年以上后端开发经验
+2. 熟练掌握 Python，熟悉 FastAPI / Flask / Django 任一框架
+3. 熟悉 MySQL、Redis，理解常见缓存与消息队列的使用场景
+4. 具备良好的代码习惯与团队协作能力`;
 
 export default function QuickOptimize({
   history,
@@ -65,6 +102,11 @@ export default function QuickOptimize({
   const [jdText, setJdText] = useState("");
   const [intensity, setIntensity] = useState<string>("enhance");
   const [loading, setLoading] = useState(false);
+  const [parsing, setParsing] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [myResumes, setMyResumes] = useState<ResumeItem[]>([]);
+  const [selectedResumeId, setSelectedResumeId] = useState<number | null>(null);
+  const [savingResume, setSavingResume] = useState(false);
   const [result, setResult] = useState<OptimizeResponse | null>(null);
   const [copied, setCopied] = useState<"analysis" | "rewrite" | null>(null);
   const [showLog, setShowLog] = useState(false);
@@ -90,6 +132,18 @@ export default function QuickOptimize({
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
   }, [restoreRequest]);
+// 加载我的简历库（用于快速调用 + 保存/覆盖）
+  useEffect(() => {
+    let alive = true;
+    apiGet<ResumeItem[]>("/resumes")
+      .then((data) => {
+        if (alive) setMyResumes(data);
+      })
+      .catch((error) => console.error(error));
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const handleOptimize = async () => {
     if (!resumeText.trim() || !jdText.trim()) {
@@ -102,7 +156,7 @@ export default function QuickOptimize({
     setShowLog(false);
 
     try {
-      const res = await fetch(`${API_URL}/optimize`, {
+      const res = await authFetch("/optimize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -131,7 +185,7 @@ export default function QuickOptimize({
       persistHistory([item, ...history].slice(0, HISTORY_LIMIT));
     } catch (error) {
       console.error(error);
-      alert("优化失败，请重试");
+      alert(error instanceof ApiError ? error.message : "优化失败，请重试");
     } finally {
       setLoading(false);
     }
@@ -149,15 +203,141 @@ export default function QuickOptimize({
     }
   };
 
+const saveResume = async () => {
+    const text = resumeText.trim();
+    if (!text) return;
+    setSavingResume(true);
+    try {
+      if (selectedResumeId) {
+        await authFetch(`/resumes/${selectedResumeId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: text }),
+        });
+        alert("已覆盖更新到我的简历 ✓");
+      } else {
+        const res = await authFetch("/resumes", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: text }),
+        });
+        const created = (await res.json()) as ResumeItem;
+        setSelectedResumeId(created.id);
+        alert("已保存到我的简历 ✓（可在简历页改名）");
+      }
+      const data = await apiGet<ResumeItem[]>("/resumes");
+      setMyResumes(data);
+    } catch (error) {
+      console.error(error);
+      alert(error instanceof ApiError ? error.message : "保存失败，请重试");
+    } finally {
+      setSavingResume(false);
+    }
+  };
+
+  const fillSample = () => {
+    setResumeText(SAMPLE_RESUME);
+    setJdText(SAMPLE_JD);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const handleUploadFile = async (file: File) => {
+    setParsing(true);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await authFetch("/resume/parse", { method: "POST", body: form });
+      const data = await res.json();
+      setResumeText(data.text);
+    } catch (error) {
+      console.error(error);
+      alert(error instanceof ApiError ? error.message : "文件解析失败，请直接粘贴文本");
+    } finally {
+      setParsing(false);
+    }
+  };
+
+  const exportMarkdown = () => {
+    if (!result) return;
+    const lines = [
+      "# 简历优化报告",
+      "",
+      `- ATS 多维评分：**${result.score}**`,
+      `- 缓存命中：${result.cache_hit ? "是" : "否"}`,
+      "",
+      "## 匹配度分析",
+      "",
+      result.analysis,
+      "",
+      "## 优化建议",
+      "",
+      result.rewrite,
+      "",
+    ];
+    const blob = new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `简历优化报告-${new Date().toISOString().slice(0, 10)}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
   return (
     <div>
       <section className="space-y-5">
         <div>
-          <div className="mb-1 flex items-baseline justify-between">
+          <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
             <label htmlFor="resume" className="text-sm font-medium text-slate-700">
               简历内容
             </label>
-            <span className="text-xs text-slate-400">{resumeText.length} 字</span>
+            <div className="flex items-center gap-2">
+              {myResumes.length > 0 && (
+                <select
+                  value={selectedResumeId ?? ""}
+                  onChange={(e) => {
+                    const id = Number(e.target.value);
+                    setSelectedResumeId(id || null);
+                    const found = myResumes.find((r) => r.id === id);
+                    if (found) setResumeText(found.content);
+                  }}
+                  className="rounded-md border border-violet-200 bg-white/70 px-2 py-0.5 text-[11px] text-violet-600 shadow-sm outline-none transition focus:border-violet-400"
+                >
+                  <option value="">我的简历…</option>
+                  {myResumes.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.name ?? "未命名简历"}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <button
+                type="button"
+                onClick={fillSample}
+                className="rounded-md border border-violet-200 bg-white/70 px-2 py-0.5 text-[11px] text-violet-600 shadow-sm transition hover:border-violet-400 hover:bg-violet-50"
+              >
+                ✨ 用示例试试
+              </button>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={parsing}
+                className="rounded-md border border-violet-200 bg-white/70 px-2 py-0.5 text-[11px] text-violet-600 shadow-sm transition hover:border-violet-400 hover:bg-violet-50 disabled:opacity-50"
+              >
+                {parsing ? "解析中…" : "📄 上传文件"}
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".txt,.md,.markdown,.pdf,.docx"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void handleUploadFile(f);
+                  e.target.value = "";
+                }}
+              />
+              <span className="text-xs text-slate-400">{resumeText.length} 字</span>
+            </div>
           </div>
           <textarea
             id="resume"
@@ -266,12 +446,31 @@ export default function QuickOptimize({
           {loading ? "优化中..." : "开始优化"}
         </button>
         <p className="text-center text-xs text-slate-400">
-          Agent 将依次执行：输入解析 → 匹配度分析 → 简历改写 → 结果汇总
+          系统将依次执行：输入解析 → 匹配度分析 → 简历改写 → 结果汇总
         </p>
       </section>
 
       {result && (
         <section className="mt-10 space-y-6">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <button
+              onClick={() => void saveResume()}
+              disabled={savingResume || !resumeText.trim()}
+              className="rounded-md border border-violet-200 bg-white/70 px-3 py-1.5 text-xs text-violet-600 shadow-sm transition hover:border-violet-400 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {savingResume
+                ? "保存中…"
+                : selectedResumeId
+                  ? "覆盖到我的简历"
+                  : "保存到我的简历"}
+            </button>
+            <button
+              onClick={exportMarkdown}
+              className="rounded-md border border-violet-200 bg-white/70 px-3 py-1.5 text-xs text-violet-600 shadow-sm transition hover:border-violet-400 hover:bg-violet-50"
+            >
+              ⬇ 导出 Markdown
+            </button>
+          </div>
           <div className="rounded-xl bg-gradient-to-br from-indigo-500 via-violet-500 to-purple-500 p-6 text-center shadow-lg">
             <p className="text-sm text-indigo-100">ATS 多维评分（规则计算）</p>
             <p className="mt-1 text-6xl font-extrabold text-white">{result.score}</p>
@@ -398,7 +597,7 @@ export default function QuickOptimize({
                 className="flex w-full items-center justify-between text-left"
               >
                 <h2 className="text-sm font-semibold text-slate-500">
-                  Agent 运行日志（{result.messages.length} 条）
+                  运行日志（{result.messages.length} 条）
                 </h2>
                 <span className="text-xs text-slate-400">
                   {showLog ? "收起 ▲" : "展开 ▼"}

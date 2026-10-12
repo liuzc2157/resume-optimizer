@@ -81,7 +81,7 @@ SEED_JDS: list[dict] = [
     },
     {
         "position_category": "前端",
-        "experience_level": "中级",
+        "experience_level": "高级",
         "title": "高级前端工程师（React）",
         "content": (
             "岗位职责：负责中后台与 C 端复杂前端应用架构，主导组件库与工程化建设。\n"

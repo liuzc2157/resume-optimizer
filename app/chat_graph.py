@@ -16,8 +16,10 @@ import logging
 import operator
 from typing import Annotated, Any, Dict, List, Optional, Tuple, TypedDict
 
-from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
+
+from .checkpointer import get_db_checkpointer
 
 from .cache import cache_store
 from .db import get_session
@@ -96,9 +98,10 @@ class ChatState(TypedDict):
     last_cache_hit: bool
 
 
-def agent_node(state: ChatState) -> Dict[str, Any]:
+def agent_node(state: ChatState, config: RunnableConfig) -> Dict[str, Any]:
     """LLM 决策节点：根据完整历史决定「调用工具」还是「直接回复」。"""
-    reply = call_llm_messages(state["messages"], tools=TOOLS)
+    usage_bucket = (config or {}).get("configurable", {}).get("usage_bucket")
+    reply = call_llm_messages(state["messages"], tools=TOOLS, usage_bucket=usage_bucket)
     msg: dict = {"role": "assistant", "content": reply.content or ""}
     if reply.tool_calls:
         msg["tool_calls"] = [
@@ -118,7 +121,9 @@ def route_after_agent(state: ChatState) -> str:
     return "tool_node" if last.get("tool_calls") else END
 
 
-def _resolve_content(state_updates: Dict[str, Any], state: Dict[str, Any], resume_text: str) -> Tuple[str, Optional[Any]]:
+def _resolve_content(
+    state_updates: Dict[str, Any], state: Dict[str, Any], resume_text: str, user_id: Optional[int] = None
+) -> Tuple[str, Optional[Any]]:
     """解析本轮要分析的 JD 文本：jd_text > jd_id > 智能匹配。返回 (content, jd_or_None)。"""
     from . import matching
 
@@ -144,11 +149,14 @@ def _resolve_content(state_updates: Dict[str, Any], state: Dict[str, Any], resum
     return "", None
 
 
-def _run_analysis(resume_text: str, state_updates: Dict[str, Any], state: Dict[str, Any]) -> Tuple[str, bool]:
+def _run_analysis(
+    resume_text: str, state_updates: Dict[str, Any], state: Dict[str, Any],
+    user_id: Optional[int] = None, usage_bucket: Optional[dict] = None,
+) -> Tuple[str, bool]:
     """匹配度分析；命中缓存则不调用 LLM。返回 (分析报告, cache_hit)。"""
     from . import nodes
 
-    content, jd = _resolve_content(state_updates, state, resume_text)
+    content, jd = _resolve_content(state_updates, state, resume_text, user_id=user_id)
     if not content:
         return "简历或 JD 尚未提供，无法分析。请先让用户提供缺失的材料，或指定岗位类别与经验等级。", False
 
@@ -157,18 +165,23 @@ def _run_analysis(resume_text: str, state_updates: Dict[str, Any], state: Dict[s
     jd_ref = f"jd:{jd.id}" if jd else f"text:{hashlib.md5(content.encode()).hexdigest()}"
 
     def compute() -> dict:
-        analysis, score = nodes.analyze_resume(resume_text, content)
+        analysis, score = nodes.analyze_resume(resume_text, content, usage_bucket=usage_bucket)
         return {"score": score, "analysis": analysis, "rewrite": ""}
 
-    res = cache_store.get_or_compute(resume_text, jd_ref, cat, lvl, compute, jd_id=jd.id if jd else None)
+    res = cache_store.get_or_compute(
+        resume_text, jd_ref, cat, lvl, compute, jd_id=jd.id if jd else None, user_id=user_id
+    )
     return res.analysis, res.cache_hit
 
 
-def _run_rewrite(resume_text: str, state_updates: Dict[str, Any], state: Dict[str, Any]) -> Tuple[str, bool]:
+def _run_rewrite(
+    resume_text: str, state_updates: Dict[str, Any], state: Dict[str, Any],
+    user_id: Optional[int] = None, usage_bucket: Optional[dict] = None,
+) -> Tuple[str, bool]:
     """改写；命中缓存则不调用 LLM。返回 (改写文本, cache_hit)。"""
     from . import nodes
 
-    content, jd = _resolve_content(state_updates, state, resume_text)
+    content, jd = _resolve_content(state_updates, state, resume_text, user_id=user_id)
     if not content:
         return "简历或 JD 尚未提供，无法改写。请先让用户提供缺失的材料，或指定岗位类别与经验等级。", False
 
@@ -177,16 +190,24 @@ def _run_rewrite(resume_text: str, state_updates: Dict[str, Any], state: Dict[st
     jd_ref = f"w:jd:{jd.id}" if jd else f"w:text:{hashlib.md5(content.encode()).hexdigest()}"
 
     def compute() -> dict:
-        analysis, _ = nodes.analyze_resume(resume_text, content)
-        rewrite = nodes.rewrite_resume(resume_text, content, analysis)
+        analysis, _ = nodes.analyze_resume(resume_text, content, usage_bucket=usage_bucket)
+        rewrite = nodes.rewrite_resume(resume_text, content, analysis, usage_bucket=usage_bucket)
         return {"score": 0, "analysis": "", "rewrite": rewrite}
 
-    res = cache_store.get_or_compute(resume_text, jd_ref, cat, lvl, compute, jd_id=jd.id if jd else None)
+    res = cache_store.get_or_compute(
+        resume_text, jd_ref, cat, lvl, compute, jd_id=jd.id if jd else None, user_id=user_id
+    )
     return res.rewrite, res.cache_hit
 
 
-def tool_node(state: ChatState) -> Dict[str, Any]:
-    """工具执行节点：执行 LLM 请求的所有工具，并把结果以 ToolMessage 回填。"""
+def tool_node(state: ChatState, config: RunnableConfig) -> Dict[str, Any]:
+    """工具执行节点：执行 LLM 请求的所有工具，并把结果以 ToolMessage 回填。
+
+    config 里的 user_id 用于：会话归属隔离 + 缓存/匹配按用户作用域。
+    """
+    cfg = (config or {}).get("configurable", {}) or {}
+    user_id = cfg.get("user_id")
+    usage_bucket = cfg.get("usage_bucket")
     last = state["messages"][-1]
     tool_messages: List[dict] = []
     state_updates: Dict[str, Any] = {}
@@ -212,12 +233,16 @@ def tool_node(state: ChatState) -> Dict[str, Any]:
             state_updates["jd_text"] = jd_text
             result = "JD 已保存。"
         elif name == "analyze_match":
-            result, hit = _run_analysis(resume_text, state_updates, state)
+            result, hit = _run_analysis(
+                resume_text, state_updates, state, user_id=user_id, usage_bucket=usage_bucket
+            )
             cache_hit_any = cache_hit_any or hit
             if hit:
                 result = f"（⚡命中缓存，未调用模型）\n\n{result}"
         elif name == "rewrite_resume":
-            result, hit = _run_rewrite(resume_text, state_updates, state)
+            result, hit = _run_rewrite(
+                resume_text, state_updates, state, user_id=user_id, usage_bucket=usage_bucket
+            )
             cache_hit_any = cache_hit_any or hit
             if hit:
                 result = f"（⚡命中缓存，未调用模型）\n\n{result}"
@@ -240,7 +265,7 @@ def build_chat_graph():
     graph.add_conditional_edges("agent_node", route_after_agent, ["tool_node", END])
     graph.add_edge("tool_node", "agent_node")
 
-    return graph.compile(checkpointer=MemorySaver())
+    return graph.compile(checkpointer=get_db_checkpointer())
 
 
 chat_agent = build_chat_graph()

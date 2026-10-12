@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from .db import get_session
 from .models import JD
@@ -94,6 +94,7 @@ def match_jds(
     experience_level: Optional[str] = None,
     top_n: int = 3,
     session=None,
+    user_id: Optional[int] = None,
 ) -> List[JDMatch]:
     """按岗位类别 + 经验等级过滤候选，再做相似度排序。
 
@@ -108,15 +109,15 @@ def match_jds(
     own_session = session is None
     s = session or get_session()
     try:
-        stmt = select(JD)
+        stmt = _user_scope(select(JD), user_id)
         if position_category:
             stmt = stmt.where(JD.position_category == position_category)
         if experience_level:
             stmt = stmt.where(JD.experience_level == experience_level)
         candidates: Sequence[JD] = s.execute(stmt).scalars().all()
         if not candidates:
-            # 维度过滤后为空，回退到全库匹配（保证总有结果）
-            candidates = s.execute(select(JD)).scalars().all()
+            # 维度过滤后为空，回退到用户可见全库匹配（保证总有结果）
+            candidates = s.execute(_user_scope(select(JD), user_id)).scalars().all()
 
         scored = [(jd, _score(resume_tokens, jd)) for jd in candidates]
         scored.sort(key=lambda x: x[1], reverse=True)
@@ -126,19 +127,39 @@ def match_jds(
             s.close()
 
 
-def get_jd(jd_id: int, session=None) -> Optional[JD]:
+def get_jd(jd_id: int, session=None, user_id: Optional[int] = None) -> Optional[JD]:
+    """按 id 取 JD，并做可见性校验：种子岗位人人可见，用户岗位仅创建者可见。"""
     own = session is None
     s = session or get_session()
     try:
-        return s.get(JD, jd_id)
+        jd = s.get(JD, jd_id)
+        if jd is None:
+            return None
+        if jd.user_id is not None and jd.user_id != user_id:
+            return None
+        return jd
     finally:
         if own:
             s.close()
 
 
-def list_jds(position_category: Optional[str] = None, experience_level: Optional[str] = None) -> List[JD]:
+def _user_scope(stmt, user_id: Optional[int]):
+    """JD 可见范围：内置种子岗位（user_id IS NULL）+ 当前用户自己上传的岗位。
+
+    未登录/无 user_id 时只能看到种子岗位，保证用户私有 JD 不泄露。
+    """
+    if user_id is None:
+        return stmt.where(JD.user_id.is_(None))
+    return stmt.where(or_(JD.user_id.is_(None), JD.user_id == user_id))
+
+
+def list_jds(
+    position_category: Optional[str] = None,
+    experience_level: Optional[str] = None,
+    user_id: Optional[int] = None,
+) -> List[JD]:
     with get_session() as s:
-        stmt = select(JD).order_by(JD.id)
+        stmt = _user_scope(select(JD).order_by(JD.id), user_id)
         if position_category:
             stmt = stmt.where(JD.position_category == position_category)
         if experience_level:
@@ -153,6 +174,7 @@ def add_jd(
     content: str,
     skills: Optional[list] = None,
     source: str = "seed",
+    user_id: Optional[int] = None,
 ) -> JD:
     with get_session() as s:
         jd = JD(
@@ -162,6 +184,7 @@ def add_jd(
             content=content,
             skills=skills,
             source=source,
+            user_id=user_id,
         )
         s.add(jd)
         s.commit()
@@ -324,6 +347,7 @@ def find_or_create_jd_by_content(
     title: Optional[str] = None,
     skills: Optional[list] = None,
     source: str = "user",
+    user_id: Optional[int] = None,
 ) -> JD:
     """用户传入自定义 JD 文本时的「查重 + 入库」。
 
@@ -341,7 +365,10 @@ def find_or_create_jd_by_content(
         title = (first_line[:24].strip() or content_clean[:24].strip() or "自定义岗位")
 
     with get_session() as s:
-        existing = s.scalar(select(JD).where(JD.content == content_clean))
+        # 查重只在「当前用户可见范围」内进行：种子岗位可复用，他人私有岗位不可见
+        existing = s.scalar(
+            _user_scope(select(JD).where(JD.content == content_clean), user_id)
+        )
         if existing is not None:
             return existing
         jd = JD(
@@ -351,6 +378,7 @@ def find_or_create_jd_by_content(
             content=content_clean,
             skills=skills,
             source=source,
+            user_id=user_id,
         )
         s.add(jd)
         s.commit()
