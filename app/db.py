@@ -1,19 +1,20 @@
-"""数据库连接层（SQLAlchemy + PyMySQL / SQLite）。
+"""数据库连接层（SQLAlchemy + Postgres / SQLite）。
 
-连接参数全部来自环境变量，方便本地 / Docker / Railway / CloudBase 切换。
+连接参数全部来自环境变量，方便本地 / Docker / Railway / Supabase 切换。
 
 支持两种引擎：
-- mysql（默认）：连真实 MySQL，用于生产 / 你的本地 MySQL / 云端 MySQL。
-- sqlite：本地开发零依赖模式，免安装、免密码、免建库，立刻能跑通全链路。
+- sqlite（默认，本地零依赖）：免安装、免密码、免建库，立刻能跑通全链路。
+- postgres：云端生产引擎（Railway Postgres / Supabase），优先用 DATABASE_URL 连接。
 
 环境变量
 --------
-    DB_TYPE          mysql(默认) | sqlite
-    DB_HOST          默认 127.0.0.1            （仅 mysql）
-    DB_PORT          默认 3306                 （仅 mysql）
-    DB_USER          默认 root                 （仅 mysql）
-    DB_PASSWORD      必填（mysql 模式，无默认避免误连）
-    DB_NAME          默认 resume_optimizer      （仅 mysql）
+    DB_TYPE          sqlite(默认) | postgres
+    DATABASE_URL     Postgres 完整连接串（postgres 模式优先；Railway/Supabase 均提供）
+    DB_HOST          默认 127.0.0.1            （仅 postgres，未设 DATABASE_URL 时）
+    DB_PORT          默认 5432                 （仅 postgres）
+    DB_USER          默认 postgres             （仅 postgres）
+    DB_PASSWORD      必填（postgres 模式，无默认避免误连）
+    DB_NAME          默认 resume_optimizer      （仅 postgres）
     DB_SQLITE_PATH   默认 ./resume_optimizer.db（仅 sqlite）
 
 本地纯开发（零依赖）跑法：
@@ -32,10 +33,10 @@ from .seed_data import SEED_JDS
 
 logger = logging.getLogger(__name__)
 
-DB_TYPE: str = os.getenv("DB_TYPE", "mysql").strip().lower()
+DB_TYPE: str = os.getenv("DB_TYPE", "sqlite").strip().lower()
 DB_HOST: str = os.getenv("DB_HOST", "127.0.0.1")
-DB_PORT: str = os.getenv("DB_PORT", "3306")
-DB_USER: str = os.getenv("DB_USER", "root")
+DB_PORT: str = os.getenv("DB_PORT", "5432")
+DB_USER: str = os.getenv("DB_USER", "postgres")
 DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
 DB_NAME: str = os.getenv("DB_NAME", "resume_optimizer")
 DB_SQLITE_PATH: str = os.getenv("DB_SQLITE_PATH", "./resume_optimizer.db")
@@ -66,14 +67,20 @@ def build_engine() -> Engine:
             poolclass=StaticPool if use_static else SingletonThreadPool,
             future=True,
         )
-    # MySQL 8 默认 caching_sha2_password，PyMySQL 已支持；charset 必须 utf8mb4
-    url = (
-        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-        f"?charset=utf8mb4"
-    )
-    logger.info("[db] 使用 MySQL 引擎 -> %s:%s/%s", DB_HOST, DB_PORT, DB_NAME)
+    # Postgres：优先用 DATABASE_URL（Railway Postgres / Supabase 都直接给完整连接串），
+    # 未设置时再按 DB_* 分段拼接；postgres:// 与 postgresql:// 统一转成 psycopg2 方言。
+    db_url = os.getenv("DATABASE_URL", "").strip()
+    if not db_url:
+        db_url = (
+            f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+        )
+    elif db_url.startswith("postgres://"):
+        db_url = "postgresql+psycopg2://" + db_url[len("postgres://"):]
+    elif db_url.startswith("postgresql://"):
+        db_url = "postgresql+psycopg2://" + db_url[len("postgresql://"):]
+    logger.info("[db] 使用 Postgres 引擎")
     return create_engine(
-        url,
+        db_url,
         pool_pre_ping=True,   # 自动剔除失效连接，避免云数据库长时间空闲断连
         pool_recycle=1800,    # 30 分钟回收，配合云数据库
         future=True,
@@ -106,27 +113,12 @@ def db_session():
 
 
 def ensure_database() -> None:
-    """（仅 MySQL）确保目标库存在；SQLite 模式为空操作。
+    """确保目标库存在（幂等，空操作）。
 
-    连到无库端点执行 CREATE DATABASE IF NOT EXISTS，避免手动建库。
-    需要所用账号具备建库权限（本地 root 通常满足）。
+    SQLite：数据库文件由引擎自动创建；Postgres：数据库实例由 Railway / Supabase
+    等平台预置，后端无需（也通常没有权限）建库，因此这里无需任何动作。
     """
-    if DB_TYPE != "mysql":
-        return
-    root = create_engine(
-        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/?charset=utf8mb4",
-        pool_pre_ping=True,
-        future=True,
-    )
-    with root.connect() as conn:
-        conn.execute(
-            text(
-                f"CREATE DATABASE IF NOT EXISTS `{DB_NAME}` "
-                f"DEFAULT CHARACTER SET utf8mb4 DEFAULT COLLATE utf8mb4_unicode_ci"
-            )
-        )
-        conn.execute(text(f"USE `{DB_NAME}`"))
-    logger.info("[db] 数据库 %s 已确保存在", DB_NAME)
+    return
 
 
 def seed_jds(s: Session) -> int:
@@ -192,11 +184,7 @@ def ensure_columns() -> None:
         for col, ddl in cols.items():
             if col in existing:
                 continue
-            stmt = (
-                f"ALTER TABLE `{table}` ADD COLUMN {ddl}"
-                if DB_TYPE == "mysql"
-                else f"ALTER TABLE {table} ADD COLUMN {ddl}"
-            )
+            stmt = f"ALTER TABLE {table} ADD COLUMN {ddl}"
             try:
                 with engine.begin() as conn:
                     conn.execute(text(stmt))
@@ -208,7 +196,7 @@ def ensure_columns() -> None:
 def init_db() -> None:
     """创建所有表（若尚不存在），初始化缓存统计单行，并写入示例 JD。
 
-    幂等：可安全在每次启动时调用。MySQL 模式会先 ensure_database。
+    幂等：可安全在每次启动时调用（ensure_database 为空操作）。
     """
     ensure_database()
     engine = get_engine()

@@ -515,6 +515,12 @@ export function UserChip({ auth }: { auth: AuthState }) {
         {quotaText && <span className="ml-1.5 text-slate-400">· {quotaText}</span>}
       </span>
       <button
+        onClick={() => router.push("/resumes")}
+        className="rounded-full border border-violet-200 bg-white/70 px-3 py-1 text-xs text-violet-600 shadow-sm transition hover:border-violet-400 hover:text-violet-700"
+      >
+        个人简历
+      </button>
+      <button
         onClick={auth.logout}
         disabled={busy}
         className="rounded-full border border-slate-200 bg-white/70 px-3 py-1 text-xs text-slate-500 shadow-sm transition hover:border-rose-300 hover:text-rose-500"

@@ -8,7 +8,7 @@
 set -e
 echo "[startup] DB_TYPE=${DB_TYPE:-sqlite} DB_SQLITE_PATH=${DB_SQLITE_PATH:-/data/resume_optimizer.db}"
 
-if [ "${DB_TYPE:-sqlite}" != "mysql" ]; then
+if [ "${DB_TYPE:-sqlite}" = "sqlite" ]; then
   TARGET_DIR="$(dirname "${DB_SQLITE_PATH:-/data/resume_optimizer.db}")"
   if mkdir -p "$TARGET_DIR" 2>/dev/null && touch "$TARGET_DIR/.wtest" 2>/dev/null; then
     rm -f "$TARGET_DIR/.wtest"

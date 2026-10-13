@@ -42,6 +42,7 @@ from typing import Any, Dict, Optional
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 # 尽早加载 .env，保证 llm.py 读取 LLM_API_KEY 时环境变量已就绪
@@ -89,6 +90,7 @@ from .matching import (  # noqa: E402
 )
 from .rate_limit import enforce_rate_limit  # noqa: E402
 from .resumes import router as resumes_router  # noqa: E402
+from .models import SavedResume  # noqa: E402
 from .schemas import (  # noqa: E402
     CacheStatsResponse,
     ChatRequest,
@@ -320,6 +322,27 @@ def chat(
             init_state["experience_level"] = req.experience_level
         if req.jd_id:
             init_state["jd_id"] = req.jd_id
+    # 从简历库载入指定简历（可选）：对话直接基于该简历进行，无需用户再粘贴
+    if req.resume_id:
+        saved = s.scalar(
+            select(SavedResume).where(
+                SavedResume.id == req.resume_id,
+                SavedResume.user_id == user.id,
+            )
+        )
+        if saved is None:
+            raise HTTPException(status_code=404, detail="简历不存在或无权访问")
+        init_state["resume_text"] = saved.content or ""
+        init_state["messages"].append(
+            {
+                "role": "system",
+                "content": (
+                    f"已从用户简历库载入简历《{saved.name or '未命名简历'}》，内容如下：\n"
+                    f"---\n{saved.content}\n---\n"
+                    "后续用户将基于这份简历提问或要求优化，无需再向用户索要简历全文。"
+                ),
+            }
+        )
     init_state["messages"].append({"role": "user", "content": req.message})
 
     try:

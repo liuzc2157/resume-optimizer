@@ -2,12 +2,18 @@
 
 import { useEffect, useRef, useState } from "react";
 import Markdown from "./markdown";
-import { ApiError, authFetch } from "./api";
+import { ApiError, apiGet, authFetch } from "./api";
 
 interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   cacheHit?: boolean; // 本轮分析是否命中缓存（仅 assistant 消息）
+}
+
+interface ResumeItem {
+  id: number;
+  name?: string | null;
+  content: string;
 }
 
 interface ChatSession {
@@ -64,12 +70,28 @@ export default function Chat() {
   const [showTarget, setShowTarget] = useState(false);
   const [positionCat, setPositionCat] = useState("");
   const [experienceLevel, setExperienceLevel] = useState("");
+  // 我的简历库（对话可从库中指定简历，后端会自动载入上下文）
+  const [myResumes, setMyResumes] = useState<ResumeItem[]>([]);
+  const [selectedResumeId, setSelectedResumeId] = useState<number | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // 首次挂载：加载历史会话列表（不自动展开旧对话，保持干净的欢迎页）
   useEffect(() => {
     setSessions(loadSessions());
     setSessionId(newSessionId());
+  }, []);
+
+  // 加载我的简历库
+  useEffect(() => {
+    let alive = true;
+    apiGet<ResumeItem[]>("/resumes")
+      .then((data) => {
+        if (alive) setMyResumes(data);
+      })
+      .catch((error) => console.error(error));
+    return () => {
+      alive = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -120,6 +142,7 @@ export default function Chat() {
           thread_id: sessionId,
           position_category: positionCat || undefined,
           experience_level: experienceLevel || undefined,
+          resume_id: selectedResumeId ?? undefined,
         }),
       });
       if (!res.ok) {
@@ -222,6 +245,23 @@ export default function Chat() {
             placeholder="经验等级（可选）"
             className="rounded-lg border border-indigo-200/70 bg-white/80 p-2 text-sm outline-none transition focus:border-violet-500 focus:ring-2 focus:ring-violet-200"
           />
+          {myResumes.length > 0 && (
+            <select
+              value={selectedResumeId ?? ""}
+              onChange={(e) => {
+                const id = Number(e.target.value);
+                setSelectedResumeId(id || null);
+              }}
+              className="col-span-2 rounded-lg border border-violet-200 bg-white/80 px-2 py-2 text-xs text-violet-600 shadow-sm outline-none transition focus:border-violet-400"
+            >
+              <option value="">从简历库选择简历（可选）…</option>
+              {myResumes.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.name ?? "未命名简历"}
+                </option>
+              ))}
+            </select>
+          )}
           <p className="col-span-2 text-[10px] text-slate-400">
             设定后，对话助手在缺简历/JD 时可按岗位与经验智能匹配；命中缓存时回复会标注「⚡ 缓存命中」。
           </p>

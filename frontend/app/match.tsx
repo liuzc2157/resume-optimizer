@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "./markdown";
-import { ApiError, authFetch } from "./api";
+import { ApiError, apiGet, authFetch } from "./api";
 
 
 
@@ -105,8 +105,17 @@ function similarityColor(sim: number | null): string {
   return "bg-rose-400";
 }
 
+interface ResumeItem {
+  id: number;
+  name?: string | null;
+  content: string;
+}
+
 export default function Match() {
   const [resumeText, setResumeText] = useState("");
+  // 我的简历库（快速载入）
+  const [myResumes, setMyResumes] = useState<ResumeItem[]>([]);
+  const [selectedResumeId, setSelectedResumeId] = useState<number | null>(null);
 
   // 维度选项（从岗位库动态派生，兜底用默认列表）
   const [cats, setCats] = useState<string[]>(DEFAULT_CATS);
@@ -182,6 +191,28 @@ export default function Match() {
     }
   }, []);
 
+  // 加载我的简历库
+  useEffect(() => {
+    let alive = true;
+    apiGet<ResumeItem[]>("/resumes")
+      .then((data) => {
+        if (!alive) return;
+        setMyResumes(data);
+        // 简历内容为空时，自动填入最近更新的简历，省去手动粘贴/选择
+        if (data.length > 0) {
+          setSelectedResumeId(data[0].id);
+          setResumeText((prev) => {
+            if (prev && prev.trim()) return prev;
+            return data[0].content;
+          });
+        }
+      })
+      .catch((error) => console.error(error));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   useEffect(() => {
     void loadJds();
     void loadStats();
@@ -246,7 +277,7 @@ export default function Match() {
   };
 
   // 选中岗位库中的某个 JD -> 直接拿它做优化
-  const useJd = async (jd: JDItem) => {
+  const optimizeWithJd = async (jd: JDItem) => {
     setSelectedJd(jd);
     await runOptimize({ jd_id: jd.id });
   };
@@ -411,9 +442,30 @@ export default function Match() {
       {/* 简历 + 维度选择 */}
       <section className="space-y-4">
         <div>
-          <div className="mb-1 flex items-baseline justify-between">
+          <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
             <label className="text-sm font-medium text-slate-700">简历内容</label>
-            <span className="text-xs text-slate-400">{resumeText.length} 字</span>
+            <div className="flex items-center gap-2">
+              {myResumes.length > 0 && (
+                <select
+                  value={selectedResumeId ?? ""}
+                  onChange={(e) => {
+                    const id = Number(e.target.value);
+                    setSelectedResumeId(id || null);
+                    const found = myResumes.find((r) => r.id === id);
+                    if (found) setResumeText(found.content);
+                  }}
+                  className="rounded-md border border-violet-200 bg-white/70 px-2 py-0.5 text-[11px] text-violet-600 shadow-sm outline-none transition focus:border-violet-400"
+                >
+                  <option value="">我的简历…</option>
+                  {myResumes.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.name ?? "未命名简历"}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <span className="text-xs text-slate-400">{resumeText.length} 字</span>
+            </div>
           </div>
           <textarea
             rows={8}
@@ -772,7 +824,7 @@ export default function Match() {
                             )}
 
                             <button
-                              onClick={() => void useJd(jd)}
+                              onClick={() => void optimizeWithJd(jd)}
                               disabled={optLoading}
                               className="mt-2.5 w-full rounded-md bg-gradient-to-r from-indigo-500 to-violet-500 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:opacity-60"
                             >

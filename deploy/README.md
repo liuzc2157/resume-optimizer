@@ -1,152 +1,105 @@
 # Resume Optimizer Agent —— 部署与运行说明
 
-后端：FastAPI + LangGraph + MySQL/SQLite + 两级缓存 + 按岗位/经验智能匹配。
-前端：Next.js（智能匹配 / 岗位库 / 缓存命中看板）。
+后端：FastAPI + LangGraph + **Postgres / SQLite** + 三级缓存 + 按岗位/经验智能匹配。
+前端：Next.js（快速优化 / 对话 / 智能匹配 / 岗位库 / 缓存看板）。
 
-> **推荐路线：先本地跑通**（零密码、零 Docker、零 API Key），再按需上云（Railway / CloudBase）。
+> 数据库策略：**本地开发用 SQLite（零依赖）**，**云端用 Postgres**（Railway Postgres 或 Supabase 二选一）。MySQL 已移除。
 
 ---
 
-## 一、本地优先（推荐先跑通）
+## 一、本地开发（推荐先跑通）
 
-### 模式 A：SQLite 零依赖（免装数据库、免密码、免 API Key）
+SQLite 零依赖，免装数据库、免密码：
 
 ```bash
 cd resume-optimizer-backend
-python -m venv .venv && .venv\Scripts\activate        # 或你已有的虚拟环境
+python -m venv .venv && .venv\Scripts\activate
 pip install -r requirements.txt
 
-# 一键端到端验证（建表+种子+智能匹配+缓存命中），无需任何密钥
-DB_TYPE=sqlite DB_SQLITE_PATH=./dev.db MOCK_LLM=1 \
-  python scripts/live_smoke.py
+# 后端（默认读 .env，DB_TYPE=sqlite，数据在 ./resume_optimizer.db）
+uvicorn app.main:app --reload --port 8001
+
+# 前端（另开终端）
+cd frontend
+npm install
+NEXT_PUBLIC_API_URL=http://localhost:8001 npm run dev
+# 打开 http://localhost:3000
 ```
 
-验证通过后，直接起服务：
-
-```bash
-DB_TYPE=sqlite DB_SQLITE_PATH=./dev.db MOCK_LLM=1 \
-  uvicorn app.main:app --reload --port 8000
-# 打开 http://localhost:8000/docs
-```
-
-- `MOCK_LLM=1`：LLM 返回固定模拟文本（含可解析的 `SCORE: 88`），方便离线验证缓存命中。
-- 想接真实 LLM：去掉 `MOCK_LLM`，设 `GLM_API_KEY`（或 `DEEPSEEK_API_KEY` + `LLM_PROVIDER=deepseek`）。
-
-### 模式 B：连你本机 MySQL（真实 MySQL 链路）
-
-```bash
-cp .env.example .env
-# 编辑 .env：DB_TYPE=mysql，并填好 DB_PASSWORD（其余默认指向 127.0.0.1:3306）
-
-# 一键建库 + 建表 + 写入示例 JD + 初始化命中统计（种子已内置，无需手动跑 init.sql）
-python scripts/setup_local.py
-
-# 起服务（接真实 LLM 需填 GLM_API_KEY）
-uvicorn app.main:app --reload --port 8000
-```
-
-> MySQL 模式同样支持 `MOCK_LLM=1` 先验证全链路；验证完再填真实 Key。
+- 需要真实 AI：在 `.env` 填 `GLM_API_KEY`（当前已填），`MOCK_LLM=0`。
+- 初始化脚本（建表 + 种子岗位，幂等）：`python scripts/setup_local.py`
 
 ---
 
-## 二、部署到云端（本地跑通后再做）
+## 二、部署到 Railway（推荐）
 
-### 选项 1：Railway（整套一键，含 MySQL）—— 最省心
+仓库已自带 `railway.json`（两个服务：`api` 后端 + `web` 前端）与两套 Dockerfile，Docker 自动构建。
 
-仓库已自带 `railway.json`。步骤：
+### 方式 A：Postgres（推荐，数据持久且多实例可共享）
 
-```bash
-npm i -g @railway/cli && railway login
-railway link                       # 关联到你的 Railway 项目
-railway add                       # 添加 MySQL 插件（自动注入 DATABASE_URL 等）
-# 在 Railway 控制台「Variables」设置：
-#   DB_TYPE=mysql，并把 MySQL 插件给出的 HOST/PORT/USER/PASSWORD/NAME 映射到 DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME
-#   GLM_API_KEY=你的Key；MOCK_LLM=0
-railway up
-```
+1. **推送代码到 GitHub**，在 Railway 新建项目 → Deploy from GitHub repo；或本地用 CLI：
+   ```bash
+   npm i -g @railway/cli && railway login
+   railway link
+   railway up
+   ```
+2. **创建 Postgres 数据库**：Railway 控制台 → 项目 → `New` → `Database` → 选 PostgreSQL。创建后把它 **Link 到 `api` 服务**，Railway 会自动注入 `DATABASE_URL`。
+3. **给 `api` 服务设置环境变量**：
+   ```
+   DB_TYPE=postgres
+   LLM_PROVIDER=glm
+   GLM_API_KEY=<你的智谱 Key>
+   MOCK_LLM=0
+   # DATABASE_URL 由 Postgres 插件自动注入，无需手填
+   ```
+4. **给 `web` 前端设置构建变量**（`NEXT_PUBLIC_API_URL` 是构建期变量）：
+   ```
+   NEXT_PUBLIC_API_URL=https://<api 服务的 Railway 域名>
+   ```
+5. 等部署完成，打开 `web` 服务的公网域名即可使用。
 
-- Railway 的 MySQL 插件会提供内网连接信息，直接映射到 `DB_*` 即可，无需公网暴露。
-- 前端：`frontend` 用 `next build`（已配 `output:"export"`）产出 `out/`，可单独在 Railway 起一个 Static 服务，或部署到 Vercel。
+> `api` 服务上的 `/data` Volume 可保留（SQLite 兜底用），用 Postgres 时不会用到。
 
-### 选项 2：CloudBase（你最初选定的目标）
+### 方式 B：SQLite + Volume（轻量，不建数据库）
 
-前置：`npm i -g @cloudbase/cli` → `tcb login`；控制台开通云数据库 MySQL（个人版已自带 MySQL，无需另购）。
-
-```bash
-# 控制台「环境变量」注入：DB_TYPE=mysql、DB_HOST/DB_USER/DB_PASSWORD/DB_NAME（云端 MySQL 内网地址）、
-# GLM_API_KEY、BACKEND_CORS_ORIGINS（前端域名）、NEXT_PUBLIC_API_URL（后端域名，构建期写死需提前 export）
-export NEXT_PUBLIC_API_URL="https://<后端容器域名>"
-tcb framework deploy
-```
-
-> ⚠️ 云端函数/容器跑在腾讯云内网，连不上你笔记本的 `localhost:3306`。无论选 CloudBase 还是 Railway，
-> MySQL 必须部署在**与后端同一可达网络**的实例（云端 MySQL / Railway MySQL 插件）。
-
----
-
-## 三、环境变量清单
-
-| 变量 | 说明 | 默认 |
-|---|---|---|
-| DB_TYPE | `mysql`（默认） / `sqlite`（本地零依赖） | mysql |
-| DB_HOST | MySQL 地址 | 127.0.0.1 |
-| DB_PORT | MySQL 端口 | 3306 |
-| DB_USER | MySQL 用户 | root |
-| DB_PASSWORD | MySQL 密码（mysql 模式必填） | — |
-| DB_NAME | 库名 | resume_optimizer |
-| DB_SQLITE_PATH | sqlite 模式文件路径 | ./resume_optimizer.db |
-| MOCK_LLM | `1` 时 LLM 返回模拟文本，免 API Key | 0 |
-| LLM_PROVIDER | `glm`（默认）/ `deepseek` | glm |
-| GLM_API_KEY / DEEPSEEK_API_KEY | 真实 LLM Key | — |
-| BACKEND_CORS_ORIGINS | 前端域名（逗号分隔） | 本地 |
+保持 `DB_TYPE=sqlite`，把 `api` 服务的 Volume 挂到 `/data`，SQLite 文件持久化在 `/data/resume_optimizer.db`（容器内已默认这个路径）。重启数据不丢，但不支持多实例并发。
 
 ---
 
-## 四、核心接口
+## 三、改用 Supabase（Postgres，等价于方式 A 的数据库替换）
 
-- `POST /optimize` 任务型：匹配岗位 → 查缓存 →（未命中）LLM 分析改写，返回 `cache_hit`
-- `POST /chat` 对话型：多轮 Agent，支持按岗位/经验智能匹配与缓存
-- `POST /match` 智能匹配：按岗位类别+经验等级返回候选岗位 Top-N
-- `GET /jds` `POST /jds` `DELETE /jds/{id}` 岗位库管理
-- `GET /cache/stats` 缓存命中统计（hits / misses / 命中率）
-- `GET /health` 健康检查 + DB 探活
+不想在 Railway 建数据库时，用 Supabase 的 Postgres 即可：
+
+1. Supabase 控制台建项目 → 左侧 `Connect` → 复制 **Session pooler（端口 5432）** 或 **Direct connection** 的连接串。
+2. 把它填到 `api` 服务环境变量：
+   ```
+   DB_TYPE=postgres
+   DATABASE_URL=postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres
+   GLM_API_KEY=<你的智谱 Key>
+   MOCK_LLM=0
+   ```
+3. 首次启动会自动建表 + 写入种子岗位（幂等）。若连接串带 `sslmode` 等参数，SQLAlchemy 直接透传即可。
+
+> 与 Railway Postgres 完全同一套代码路径，仅 `DATABASE_URL` 不同。
 
 ---
 
-## 五、缓存与匹配说明
+## 四、环境变量一览
 
-- **缓存键** = `md5(版本 | 归一化简历 | 岗位引用)`，岗位引用可以是库内 `jd:<id>` 或用户直传 JD 的 `text:<md5>`。
-- **三级缓存**：进程内 LRU → 数据库精确键 → **语义近似（同岗位分区内，余弦相似度 ≥ 0.95）** → 调用 LLM。
-  语义层是精确缓存覆盖不到的场景（简历改了几个字、调了语序）的关键补充；
-  为防误命中，检索**只在同一个岗位分区内**进行，且阈值取保守的 0.95。
-- **智能匹配**：jieba 分词（缺失退化为中文 bigram）+ 技能加权重叠系数，先按「岗位类别 + 经验等级」过滤候选再排序；JD 解析优先级：直传 `jd_text` > 指定 `jd_id` > 智能匹配。
+| 变量 | 说明 | 本地默认 |
+| --- | --- | --- |
+| `DB_TYPE` | `sqlite`（本地） / `postgres`（云端） | sqlite |
+| `DATABASE_URL` | Postgres 连接串（postgres 模式必填；Railway/Supabase 都直接给） | — |
+| `DB_SQLITE_PATH` | SQLite 文件路径 | ./resume_optimizer.db |
+| `LLM_PROVIDER` | glm / deepseek / … | glm |
+| `GLM_API_KEY` | 智谱 Key（glm-4-flash 免费） | — |
+| `MOCK_LLM` | `1` 走模拟文本离线验证 | 0 |
+| `NEXT_PUBLIC_API_URL` | 前端调后端地址（构建期） | http://localhost:8001 |
 
-## 六、要不要上 Redis？
+---
 
-**结论：现阶段不需要，等到多实例部署时再加。**
+## 五、验证部署
 
-当前缓存层次已经能自洽工作：
-
-| 层 | 位置 | 是否跨进程共享 | 作用 |
-|---|---|---|---|
-| L1 精确 | 进程内 LRU | ❌ 仅本进程 | 热路径零开销 |
-| L2 精确 | MySQL `analysis_cache` | ✅ | 重启/多实例都能命中 |
-| L3 语义 | MySQL（分区内向量比对） | ✅ | 抓「改了几个字」的近似重复 |
-
-**什么情况下才真正需要 Redis：**
-
-1. **后端跑了多个实例**（云端自动扩缩容、Railway/CloudBase 多副本）——
-   此时每个实例的 L1 各自为政，Redis 可以作为**共享的 L1.5**，显著减少对 MySQL 的查询。
-2. **QPS 很高**，MySQL 每次请求一次查询成为瓶颈——Redis 读写比 MySQL 快一个数量级。
-3. **想要原生 TTL 自动过期**——目前 MySQL 缓存靠 `CACHE_VERSION` 整体失效，不过期；
-   若希望「7 天未命中的缓存自动清理」，Redis 的 TTL 更省事。
-4. **语义检索要上规模**——现在每个分区最多扫 200 条做余弦比对（`SEMANTIC_CACHE_SCAN`），
-   数据量大后应换 Redis 的向量检索（RediSearch）或专用向量库（FAISS/Milvus）。
-
-**代价**：Redis 是内存型，重启即丢（不过 MySQL 才是真相源，丢了只是回到 L2/L3，不会出错）；
-另外要多运维一个服务，本地 Windows 还得靠 WSL/Docker 跑。
-
-**怎么加（未来需要时）**：在 `app/cache.py` 的 `get_or_compute` 里，
-于「内存 LRU」和「MySQL 精确键」之间插一层 Redis 查询即可，
-业务代码与接口签名都不用动——这也是当初把缓存收敛到单一模块的原因。
-
+- 后端健康检查：`GET https://<api域名>/health` 应返回 `{"status":"ok"}` 且含数据库信息。
+- 前端打开后能注册/登录、保存简历、跑快速优化/对话/智能匹配，说明前后端 + 数据库全链路正常。
+- 云端表结构由启动时的 `init_db()` 自动创建，无需手工跑 SQL。

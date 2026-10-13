@@ -137,7 +137,16 @@ export default function QuickOptimize({
     let alive = true;
     apiGet<ResumeItem[]>("/resumes")
       .then((data) => {
-        if (alive) setMyResumes(data);
+        if (!alive) return;
+        setMyResumes(data);
+        // 简历内容为空时，自动填入最近更新的简历，省去手动粘贴/选择
+        if (data.length > 0) {
+          setSelectedResumeId(data[0].id);
+          setResumeText((prev) => {
+            if (prev && prev.trim()) return prev;
+            return data[0].content;
+          });
+        }
       })
       .catch((error) => console.error(error));
     return () => {

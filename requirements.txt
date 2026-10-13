@@ -7,7 +7,7 @@ openai>=1.40.0
 pydantic>=2.7.0
 # ===== 新增：数据库 + 缓存 + 匹配 =====
 sqlalchemy>=2.0.0
-pymysql>=1.1.0
+psycopg2-binary>=2.9.0   # Postgres 驱动（云端 Railway/Supabase 用）
 jieba>=0.42.1
 # ===== 新增：JD 文件上传解析（txt/md/pdf/docx） =====
 python-multipart>=0.0.9   # FastAPI 接收 UploadFile 必需

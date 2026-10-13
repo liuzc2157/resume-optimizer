@@ -166,6 +166,7 @@ class ChatRequest(BaseModel):
     position_category: Optional[str] = Field(None, description="目标岗位类别（可选）")
     experience_level: Optional[str] = Field(None, description="目标经验等级（可选）")
     jd_id: Optional[int] = Field(None, description="指定库内 JD id（可选）")
+    resume_id: Optional[int] = Field(None, description="指定库内简历 id（可选），载入后对话基于该简历进行")
 
 
 class ChatResponse(BaseModel):

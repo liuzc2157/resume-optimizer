@@ -34,9 +34,8 @@ def main() -> None:
         n_jd = len(s.execute(select(JD)).scalars().all())
     print(f"[setup] 初始化完成：JD 岗位数 = {n_jd}")
     print("[setup] 现在可以启动后端：")
-    print("        MySQL  : uvicorn app.main:app --reload --port 8000")
-    print("        SQLite: DB_TYPE=sqlite DB_SQLITE_PATH=./resume_optimizer.db \\")
-    print("                 uvicorn app.main:app --reload --port 8000")
+    print("        SQLite  : DB_TYPE=sqlite DB_SQLITE_PATH=./resume_optimizer.db uvicorn app.main:app --reload --port 8000")
+    print("        Postgres: DB_TYPE=postgres DATABASE_URL=<连接串> uvicorn app.main:app --reload --port 8000")
 
 
 if __name__ == "__main__":
