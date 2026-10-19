@@ -25,6 +25,7 @@ import re
 from typing import List, Optional
 
 from .embedding import normalize
+from .keywords import extract_jd_keywords, extract_years
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +52,6 @@ _QUANT_PATTERNS = [
     r"\d+\s*%", r"\d+\s*倍", r"\d+\s*万", r"\d+\s*w\b",
     r"增长", r"提升", r"降低", r"减少", r"节省", r"提高",
 ]
-_YEAR_PATTERNS = [
-    r"(\d+)\s*年(?:以上)?(?:的)?(?:工作|开发|从业|相关)?经验",
-    r"(\d+)\s*\+?\s*years?[^。；\n]{0,10}experience",
-    r"经验[：: ]*(\d+)\s*年",
-]
-
 WEIGHTS = {
     "keyword_match": 0.35,
     "experience_match": 0.20,
@@ -75,38 +70,22 @@ LABELS = {
 
 
 def _extract_years(text: str) -> Optional[int]:
-    """从文本里抽取「X 年经验」的年限，抽不到返回 None。"""
-    for pat in _YEAR_PATTERNS:
-        m = re.search(pat, text, flags=re.IGNORECASE)
-        if m:
-            try:
-                return int(m.group(1))
-            except (ValueError, IndexError):
-                continue
-    return None
+    """抽取工作年限（委托 keywords.extract_years，与 matching 共用同一套规则）。
+
+    历史问题：这里原有一套只认「3 年经验」固定语序的正则，导致简历里最常见的
+    「工作年限：3 年」识别不到，经验维度被打成「未写明年限」的中性分。
+    """
+    return extract_years(text, pick="first")
 
 
 def _jd_keywords(jd_content: str, jd_skills: Optional[List[str]]) -> List[str]:
-    """确定用于比对「覆盖率」的关键词集合。
+    """确定用于比对「覆盖率」的关键词集合（委托 keywords.extract_jd_keywords）。
 
-    优先用岗位库里结构化的 skills 字段；没有则从 JD 正文抽分词候选。
+    历史问题：这里原来直接对 JD 分词后按词频取 Top-20，未过滤停用词与技术词，
+    「要求/参与/至少/一种/岗位/统招/全日制/2026」等套话被当成技能关键词，
+    使占比 35% 的关键词维度实际只衡量了套话重叠度。
     """
-    if jd_skills:
-        return [str(s) for s in jd_skills if str(s).strip()]
-
-    text = normalize(jd_content)
-    try:  # pragma: no cover - jieba 可选
-        import jieba  # type: ignore
-
-        toks = [t for t in jieba.cut(text) if len(t) >= 2]
-    except Exception:  # noqa: BLE001
-        toks = re.findall(r"[a-zA-Z]{2,}|[\u4e00-\u9fff]{2,}", text)
-    # 按出现频次取前 20 个作为关键词
-    freq: dict[str, int] = {}
-    for t in toks:
-        freq[t] = freq.get(t, 0) + 1
-    top = sorted(freq.items(), key=lambda kv: kv[1], reverse=True)[:20]
-    return [k for k, _ in top]
+    return extract_jd_keywords(jd_content, jd_skills, limit=20)
 
 
 def _score_keyword(resume: str, jd_content: str, jd_skills: Optional[List[str]]) -> tuple:

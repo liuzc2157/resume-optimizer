@@ -20,6 +20,7 @@ from typing import List, Optional, Sequence
 from sqlalchemy import or_, select
 
 from .db import get_session
+from .keywords import extract_years
 from .models import JD
 
 logger = logging.getLogger(__name__)
@@ -230,14 +231,14 @@ LEVEL_KEYWORDS: dict[str, list[str]] = {
 
 
 def _extract_years(text: str) -> Optional[int]:
-    """从 JD 文本里抽取要求年限（取最大值，如「3-5 年」取 5）。"""
-    low = (text or "").lower()
-    nums: list[int] = []
-    for m in re.finditer(r"(\d{1,2})\s*[-~到至]?\s*(\d{1,2})?\s*年", low):
-        for g in (m.group(1), m.group(2)):
-            if g:
-                nums.append(int(g))
-    return max(nums) if nums else None
+    """从 JD/简历文本里抽取年限（区间取上限，如「3-5 年」取 5，用于经验等级归级）。
+
+    委托 keywords.extract_years 统一实现。历史问题：这里原来用
+    `(\\d{1,2})[-~到至]?(\\d{1,2})?年` 这种宽松匹配取最大值，会把
+    「1999-04」「2026 届」里的数字也吃进来，一份 3 年经验的简历能被解析成 23 年，
+    从而被误判成「资深」。
+    """
+    return extract_years(text, pick="max")
 
 
 def _hits(low_text: str, keywords: Sequence[str]) -> list[str]:
