@@ -68,6 +68,29 @@ _EXPERIENCE_YEAR_PATTERNS: List[str] = [
 # 无任何年限数字时，用「应届/在校」兜底为 0 年
 _FRESH_GRADUATE_HINTS = ("应届", "在校生", "实习生", "在校")
 
+# ---- 校招 / 应届岗位识别 ----
+# 场景：JD 写「2026 届」「校园招聘」，岗位性质就是校招。
+# 此时一个已经工作 3 年的候选人，年限上「达标」但身份与薪资预期明显错配，
+# 不能按「3 年 ≥ 3 年」给满分——这是简历顾问最该提醒的点之一。
+_FRESH_GRAD_JD_PATTERNS = [
+    re.compile(r"20\d{2}\s*届"),
+    re.compile(r"校园招聘|校招|应届生?|在校生|实习生招聘|管培生|毕业生"),
+]
+# JD 自身声明面向往届/社招时，不做校招判定
+_NOT_FRESH_GRAD_PATTERNS = [
+    re.compile(r"不限应届|应届不限|社招|社会招聘|往届"),
+]
+
+
+def is_fresh_graduate_requirement(jd_text: str) -> bool:
+    """判断该 JD 是否为「应届 / 校园招聘」性质岗位。"""
+    if not jd_text:
+        return False
+    text = normalize(jd_text)
+    if any(p.search(text) for p in _NOT_FRESH_GRAD_PATTERNS):
+        return False
+    return any(p.search(text) for p in _FRESH_GRAD_JD_PATTERNS)
+
 
 def _first_int(pattern: str, text: str) -> Optional[int]:
     m = re.search(pattern, text, flags=re.IGNORECASE)

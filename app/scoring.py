@@ -25,7 +25,7 @@ import re
 from typing import List, Optional
 
 from .embedding import normalize
-from .keywords import extract_jd_keywords, extract_years
+from .keywords import extract_jd_keywords, extract_years, is_fresh_graduate_requirement
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +109,24 @@ def _score_keyword(resume: str, jd_content: str, jd_skills: Optional[List[str]])
 
 def _score_experience(resume: str, jd_content: str, level: Optional[str]) -> tuple:
     r_years = _extract_years(resume)
-    j_years = _extract_years(jd_content) or (_LEVEL_YEARS.get(level or "", None))
+    j_years_explicit = _extract_years(jd_content)
+
+    # 校招 / 应届岗：岗位性质本身就是硬门槛，不能只拿年限比大小。
+    # 典型错判：JD 写「2026 届」，候选人工作 3 年，旧逻辑走「中级要求 3 年 → 3 ≥ 3 → 100 分」，
+    # 但这是应届岗，社招身份属于超配，招聘官一定会追问动机与薪资预期。
+    if j_years_explicit is None and is_fresh_graduate_requirement(jd_content):
+        if r_years is None:
+            return 70.0, "JD 为应届/校招岗位，简历未写明毕业生身份或年限"
+        if r_years == 0:
+            return 100.0, "JD 为应届/校招岗位，简历为应届生，身份匹配"
+        if r_years == 1:
+            return 70.0, f"JD 为应届/校招岗位，简历有 {r_years} 年经验：已属社招，略微超配"
+        return 45.0, (
+            f"JD 为应届/校招岗位，简历有 {r_years} 年社招经验：身份超配，"
+            "需说明求职动机与薪资预期是否匹配"
+        )
+
+    j_years = j_years_explicit or (_LEVEL_YEARS.get(level or "", None))
     if r_years is None and j_years is None:
         return 70.0, "双方均未写明年限，给中性分"
     if j_years is None:
