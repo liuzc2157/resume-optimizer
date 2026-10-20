@@ -88,7 +88,7 @@ from .matching import (  # noqa: E402
     list_jds,
     update_jd,
 )
-from .rate_limit import enforce_rate_limit  # noqa: E402
+from .rate_limit import consume_quota, enforce_rate_limit  # noqa: E402
 from .resumes import router as resumes_router  # noqa: E402
 from .models import SavedResume  # noqa: E402
 from .schemas import (  # noqa: E402
@@ -174,6 +174,7 @@ def optimize(
     s: Session = Depends(db_session),
 ) -> OptimizeResponse:
     """任务型：匹配岗位 → 查缓存 →（未命中）LLM 分析改写。"""
+    consume_quota(s, user, "/optimize")  # 原子占配额，并发不会超额
     try:
         result = service.optimize_resume(
             resume_text=req.resume_text,
@@ -216,6 +217,10 @@ def match(
     s: Session = Depends(db_session),
 ) -> MatchResponse:
     """智能匹配：use_rag=False 走关键词重叠+技能加权；use_rag=True 走 RAG 向量检索。"""
+    if req.use_rag:
+        # 只有 RAG 分支会调 LLM（提炼检索词），才占用配额；
+        # 纯关键词匹配是本地零成本计算，不占额度。
+        consume_quota(s, user, "/match")
     try:
         result = service.match_resume(
             resume_text=req.resume_text,
@@ -247,6 +252,7 @@ def rag_retrieve_endpoint(
     s: Session = Depends(db_session),
 ) -> RagRetrieveResponse:
     """RAG 检索：简历 -> 提炼 -> 向量召回最相似的 Top-K 岗位 JD。"""
+    consume_quota(s, user, "/rag/retrieve")  # 内部会调 LLM 提炼检索词
     try:
         result = rag.rag_retrieve(
             req.resume_text, top_k=req.top_k, category=req.category, level=req.level, user_id=user.id
@@ -307,6 +313,7 @@ def chat(
     thread_id 以「用户id:会话id」命名空间存储，保证不同用户的会话互不可见；
     返回给客户端的仍是原始 thread_id（续聊时携带即可）。
     """
+    consume_quota(s, user, "/chat")  # 原子占配额，并发不会超额
     raw_thread = req.thread_id or str(uuid.uuid4())
     thread_id = f"{user.id}:{raw_thread}"
     config = {"configurable": {"thread_id": thread_id, "user_id": user.id, "usage_bucket": usage}}
@@ -510,6 +517,7 @@ def compare(
     s: Session = Depends(db_session),
 ) -> CompareResponse:
     """同一份简历 vs 多个岗位，横向对比「投哪个最合适」。"""
+    consume_quota(s, user, "/compare")  # 原子占配额，并发不会超额
     try:
         result = service.compare_resume(
             resume_text=req.resume_text,

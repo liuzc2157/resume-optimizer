@@ -10,6 +10,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CHAR,
+    Date,
     DateTime,
     Float,
     Index,
@@ -107,6 +108,9 @@ class MatchLog(Base):
     __tablename__ = "match_log"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # 归属用户：注销账号时要能按 user_id 彻底清除。
+    # 历史行没有该字段（老库补列为 NULL），无法归属，属于遗留数据。
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     resume_hash: Mapped[str] = mapped_column(CHAR(32), nullable=False)
     position_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
     experience_level: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -198,6 +202,26 @@ class UsageLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     __table_args__ = (Index("idx_user_created", "user_id", "created_at"),)
+
+
+class QuotaUsage(Base):
+    """每日配额计数（每用户每天一行），用于**原子**占用配额。
+
+    为什么要单独一张表：配额原先靠「统计 usage_log 今天的行数」得出，
+    检查发生在请求开始时、写入发生在请求结束时（handler 末尾），两者之间有窗口——
+    并发请求会同时读到「还有余额」，于是 N 个请求一起放行，配额形同虚设（TOCTOU）。
+    这里用唯一键 (user_id, day) + `UPDATE ... WHERE used < quota` 的原子自增，
+    把「检查」和「占用」合并成一次数据库操作，并发下也只有配额数量能成功。
+    """
+
+    __tablename__ = "quota_usage"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    day: Mapped[datetime] = mapped_column(Date, nullable=False)
+    used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (UniqueConstraint("user_id", "day", name="uq_quota_user_day"),)
 
 
 class ChatCheckpoint(Base):

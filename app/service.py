@@ -111,6 +111,7 @@ def optimize_resume(
         # 写匹配日志
         s.add(
             MatchLog(
+                user_id=user_id,  # 归属用户：注销账号时按它清理
                 resume_hash=result.resume_hash,
                 position_category=position_category or (jd.position_category if jd else None),
                 experience_level=experience_level or (jd.experience_level if jd else None),

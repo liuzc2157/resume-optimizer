@@ -19,6 +19,8 @@ from .models import (
     ChatWrite,
     EmailCode,
     JD,
+    MatchLog,
+    QuotaUsage,
     SavedResume,
     UsageLog,
     User,
@@ -320,6 +322,11 @@ def delete_me(
     s.execute(delete(AnalysisCache).where(AnalysisCache.user_id == user_id))
     s.execute(delete(JD).where(JD.user_id == user_id))
     s.execute(delete(SavedResume).where(SavedResume.user_id == user_id))
+    # 匹配日志记录的是「简历哈希 + 岗位偏好画像」，属于个人信息，必须一并清除。
+    # 老库该列是后补的，历史行 user_id 为 NULL（无法归属），只能留作遗留数据。
+    s.execute(delete(MatchLog).where(MatchLog.user_id == user_id))
+    # 配额计数行
+    s.execute(delete(QuotaUsage).where(QuotaUsage.user_id == user_id))
     s.delete(user)
     s.commit()
     logger.info("[auth] 用户已注销并清除全部数据：%s (id=%d)", user.username, user_id)

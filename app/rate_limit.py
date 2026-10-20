@@ -16,14 +16,16 @@ import os
 import threading
 import time
 from collections import defaultdict, deque
+from datetime import date, datetime, timezone
 from typing import Deque, Tuple
 
 from fastapi import Depends, HTTPException, Request, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .db import db_session
-from .models import UsageLog, User
+from .models import QuotaUsage, UsageLog, User
 from .security import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -69,8 +71,18 @@ _user_limiter = SlidingWindowLimiter(RATE_LIMIT_PER_MINUTE, 60.0)
 _ip_limiter = SlidingWindowLimiter(AUTH_IP_RATE_LIMIT, 60.0)
 
 
-def _daily_used(s: Session, user_id: int) -> int:
-    """统计该用户今天已消费的配额单位数。"""
+def _today() -> date:
+    """今天（UTC，与数据库 server_default=now() 的时间口径一致）。"""
+    return datetime.now(timezone.utc).date()
+
+
+def _legacy_daily_used(s: Session, user_id: int) -> int:
+    """按 usage_log 统计今天已用的配额单位数。
+
+    只在两个地方用：① 当天第一次占用配额时，把历史用量一次性对齐进计数器
+    （避免上线当天给用户凭空多出一次额度）；② 计数行还没建立时给
+    /users/me 兜底展示。
+    """
     today = func.date(func.now())
     stmt = (
         select(func.count(UsageLog.id))
@@ -79,6 +91,15 @@ def _daily_used(s: Session, user_id: int) -> int:
         .where(func.date(UsageLog.created_at) == today)
     )
     return int(s.scalar(stmt) or 0)
+
+
+def _used_today(s: Session, user_id: int) -> int:
+    row = s.scalar(
+        select(QuotaUsage).where(QuotaUsage.user_id == user_id, QuotaUsage.day == _today())
+    )
+    if row is not None:
+        return int(row.used or 0)
+    return _legacy_daily_used(s, user_id)
 
 
 def get_daily_quota(user: User) -> int:
@@ -95,27 +116,94 @@ def quota_remaining(s: Session, user: User) -> int:
     quota = get_daily_quota(user)
     if quota <= 0:
         return -1
-    used = _daily_used(s, user.id)
-    return max(0, quota - used)
+    return max(0, quota - _used_today(s, user.id))
+
+
+def _quota_exhausted() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail="今日免费配额已用完，请明天再试（或联系开通更多额度）",
+    )
+
+
+def consume_quota(s: Session, user: User, endpoint: str) -> None:
+    """原子占用一次每日配额；超出上限抛 429。
+
+    为什么需要它：原实现是「请求开始时读 usage_log 算余额、请求结束时才写用量」，
+    两个动作之间存在窗口，并发请求会同时看到「还有余额」而全部放行（TOCTOU），
+    一个 10 次/天的免费档可以被一波并发刷到远超 10 次。
+
+    这里把「检查」与「占用」合并成一次条件更新：`UPDATE ... WHERE used < quota`，
+    只有 rowcount=1 才算抢到名额；数据库保证这一步是原子的。
+    """
+    quota = get_daily_quota(user)
+    if quota <= 0:  # 不限量
+        return
+    day = _today()
+
+    # 1) 计数行已存在：还有余额时自增才生效
+    res = s.execute(
+        update(QuotaUsage)
+        .where(
+            QuotaUsage.user_id == user.id,
+            QuotaUsage.day == day,
+            QuotaUsage.used < quota,
+        )
+        .values(used=QuotaUsage.used + 1)
+    )
+    s.commit()
+    if res.rowcount:
+        logger.debug("[quota] %s 占用一次配额（endpoint=%s）", user.id, endpoint)
+        return
+
+    # 2) 行已存在但已满 -> 拒绝
+    row = s.scalar(
+        select(QuotaUsage).where(QuotaUsage.user_id == user.id, QuotaUsage.day == day)
+    )
+    if row is not None:
+        raise _quota_exhausted()
+
+    # 3) 今天还没有计数行：建行并把历史用量对齐进来
+    seed = _legacy_daily_used(s, user.id)
+    if seed >= quota:
+        raise _quota_exhausted()
+    try:
+        s.add(QuotaUsage(user_id=user.id, day=day, used=seed + 1))
+        s.commit()
+        logger.debug("[quota] %s 建立今日计数行（seed=%d）", user.id, seed)
+    except IntegrityError:
+        # 并发下别的请求先建了行 -> 退化为条件自增
+        s.rollback()
+        res = s.execute(
+            update(QuotaUsage)
+            .where(
+                QuotaUsage.user_id == user.id,
+                QuotaUsage.day == day,
+                QuotaUsage.used < quota,
+            )
+            .values(used=QuotaUsage.used + 1)
+        )
+        s.commit()
+        if not res.rowcount:
+            raise _quota_exhausted() from None
 
 
 def enforce_rate_limit(
     user: User = Depends(get_current_user),
     s: Session = Depends(db_session),
 ) -> User:
-    """业务接口限流 + 配额依赖：先鉴权、再限流、再查配额，超限抛 429。"""
+    """业务接口限流依赖：先鉴权、再按用户滑动窗口限流，超频抛 429。
+
+    这里**不再**做配额预检：配额改由 consume_quota() 在真正会调 LLM 的 handler
+    里原子占用。放在依赖里既拦不准（/match 是否消耗配额取决于请求体的 use_rag），
+    又会误伤不消耗配额的接口（配额用尽时连岗位库、简历库都读不了）。
+    """
     ok, retry = _user_limiter.allow(f"user:{user.id}")
     if not ok:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"请求过于频繁，请 {int(retry) + 1} 秒后再试",
             headers={"Retry-After": str(int(retry) + 1)},
-        )
-    remaining = quota_remaining(s, user)
-    if remaining == 0:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="今日免费配额已用完，请明天再试（或联系开通更多额度）",
         )
     return user
 

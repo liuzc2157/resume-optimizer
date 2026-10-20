@@ -166,6 +166,10 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "saved_resumes": {
         "sections": "sections JSON NULL",
     },
+    "match_log": {
+        # 注销账号要按 user_id 清理匹配日志，老库需补这一列
+        "user_id": "user_id INTEGER NULL",
+    },
 }
 
 
