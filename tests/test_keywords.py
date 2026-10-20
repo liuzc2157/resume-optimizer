@@ -160,3 +160,75 @@ class TestExperienceScoringForCampusJobs:
         score, detail = self._exp("工作年限：3 年", jd)
         assert score == 50.0, detail  # 3 年 vs 要求 5 年，差 2 年 -> 100-50
 
+
+class TestKeywordWordBoundary:
+    """英文技能必须按词边界匹配，不能做子串匹配。"""
+
+    def test_go_does_not_match_django(self):
+        from app.embedding import normalize
+        from app.scoring import _contains
+
+        norm = normalize("熟悉 Django 框架，了解 JavaScript 与 TypeScript")
+        assert _contains(norm, "go") is False, "「go」不应命中 Django"
+        assert _contains(norm, "java") is False, "「java」不应命中 JavaScript"
+
+    def test_exact_ascii_skill_still_matches(self):
+        from app.embedding import normalize
+        from app.scoring import _contains
+
+        norm = normalize("熟悉 Go、Java、Django")
+        assert _contains(norm, "go") is True
+        assert _contains(norm, "java") is True
+        assert _contains(norm, "django") is True
+
+    def test_chinese_uses_substring(self):
+        from app.embedding import normalize
+        from app.scoring import _contains
+
+        assert _contains(normalize("熟练使用 MySQL 与 Redis"), "mysql") is True
+
+
+class TestRequirementGroups:
+    """并列条件（至少一门 / 等）要合并成一个要求单元，而不是逐项扣分。"""
+
+    JD = (
+        "任职要求：熟练掌握 Java、Go、C++、PHP 等至少一门语言，编程基础扎实；"
+        "了解 Windows、Unix、Linux 等主流操作系统原理；"
+        "熟悉 MySQL、Redis、Kafka，有高并发经验。"
+    )
+
+    def test_detects_alternative_groups(self):
+        from app.keywords import find_requirement_groups
+
+        groups = find_requirement_groups(self.JD)
+        flat = [m.lower() for g in groups for m in g]
+        assert "java" in flat and "go" in flat and "php" in flat
+        assert "windows" in flat and "linux" in flat
+        # 「熟悉 MySQL、Redis、Kafka」没有「等/至少」，是并列硬要求，不能合并
+        assert not any("mysql" in [x.lower() for x in g] for g in groups)
+
+    def test_group_counts_as_one_unit(self):
+        from app.keywords import requirement_units
+
+        units = requirement_units(self.JD, ["java", "go", "php", "windows", "linux", "mysql"])
+        labels = [label for _, label in units]
+        assert any("任一" in lb for lb in labels)
+        # java/go/php 三个词合并成 1 个单元
+        assert sum(1 for _, lb in units if "任一" in lb) == 2
+
+    def test_missing_one_alternative_is_not_a_miss(self):
+        from app.scoring import _score_keyword
+
+        # 只写了 Java，没写 Go/C++/PHP；只写了 Linux，没写 Windows/Unix
+        resume = "熟悉 Java 开发；了解 Linux 系统；熟练使用 MySQL、Redis、Kafka，有高并发经验"
+        score, detail, hits, misses = _score_keyword(resume, self.JD, None)
+        assert score == 100.0, f"{detail} / misses={misses}"
+
+    def test_missing_all_alternatives_is_a_miss(self):
+        from app.scoring import _score_keyword
+
+        resume = "熟悉 Excel 与 Word，擅长文档整理"
+        score, detail, hits, misses = _score_keyword(resume, self.JD, None)
+        assert any("任一" in m for m in misses), f"整组都不满足应报为一项缺失：{misses}"
+
+

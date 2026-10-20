@@ -222,6 +222,8 @@ GENERIC_STOPWORDS: frozenset = frozenset({
     "本科", "硕士", "专科", "博士", "研究生", "学历本科", "统招", "全日制", "非全日制",
     "应届", "往届", "在校", "毕业生", "届", "专业", "相关专业", "以上学历",
     "计算机", "工程", "科学", "学科", "通信", "电子信息",
+    # 专业名称：不是技能，但会在简历里出现，容易被当成长技能命中
+    "软件工程", "计算机科学与技术", "网络工程", "电子信息工程", "通信工程",
     # 通用动作 / 描述词
     "参与", "协助", "负责", "配合", "完成", "支持", "提供", "推动", "保障", "跟踪",
     "学习", "使用", "习惯", "整理", "编写", "撰写", "维护", "建设", "设计", "实现",
@@ -234,7 +236,12 @@ GENERIC_STOPWORDS: frozenset = frozenset({
     "能力", "经验", "技能", "意识", "态度", "思维", "习惯", "问题", "问题解决",
     "独立", "主动", "积极", "良好", "优秀", "较强", "较强", "较强", "较强",
     "熟悉", "熟练", "掌握", "了解", "精通", "具备", "具有", "能够", "可以", "善于",
+    # jieba 会把「熟练掌握」「深入理解」切成一整个词，单词停用表拦不住，需显式列出
+    "熟练掌握", "熟练运用", "熟练操作", "深入理解", "深刻理解", "扎实的", "较强的",
+    "优先考虑", "工作经验", "项目经验", "相关经验", "学习能力", "沟通能力", "团队协作",
     "至少", "一种", "一项", "以上", "以下", "以及", "或者", "等等", "优先", "加分",
+    # 量词碎片：「至少一门语言」里的「一门」会被 jieba 单独切出来
+    "一门", "一种", "一项", "一个", "一类", "两种", "三项", "语言",
     "相关", "方向", "领域", "行业", "技术", "技术方案", "新技术", "前沿",
     "一定", "较强", "优秀", "丰富的", "扎实的", "良好的",
 })
@@ -338,6 +345,83 @@ def extract_jd_keywords(
             seen.add(t)
 
     result = tier1 + tier2
-    if len(result) < 10:
-        result += tier3[: 10 - len(result)]
+    # 补位门槛不宜太高：硬凑到 10 个会把「编程」「语言」这类弱词拉进来，
+    # 反而稀释真正的技能信号，宁可关键词少一点。
+    if len(result) < 8:
+        result += tier3[: 8 - len(result)]
     return result[:limit]
+
+
+# ======================================================================================
+# 三、并列条件（"至少一门 / 任一 / 等"）识别
+# ======================================================================================
+# 问题：JD 写「熟练掌握 Java、Go、C++、PHP 等至少一门语言」时，逐项比对会把
+# 没写 PHP 判成"缺失"，简历写 Java 也救不回来——这是把"或"关系当成了"与"关系。
+# 同理「Windows、Unix、Linux 等主流操作系统」。
+# 这里把这类并列项合并成一个**要求单元**：命中任意一项即视为满足。
+#
+# 注意：只有出现「等 / 至少一门 / 任一 / 之一」才合并；像
+# 「熟悉 MySQL、Redis、Kafka」这种没有"等"字的是并列硬要求，不能合并。
+_ENUM_ITEM = r"[A-Za-z][A-Za-z0-9+#./]{1,}|[\u4e00-\u9fff]{2,8}"
+# 注意：_ENUM_ITEM 本身是「A|B」形式，拼进别的正则时必须整体加非捕获括号，
+# 否则 `|` 会把外层分组切成两条分支（实测导致重复部分跳过分隔符去匹配中文）。
+_ENUM_TOKEN = r"(?:" + _ENUM_ITEM + r")"
+_ENUM_SEP = r"[、,，/]"
+_GROUP_TAIL = r"(?:等[^。；\n]{0,12}?(?:至少|一[门种个项])|等|至少[一]?[门种个项]|任一|之一)"
+
+_ENUM_GROUP_RE = re.compile(
+    r"(" + _ENUM_TOKEN + r"(?:\s*" + _ENUM_SEP + r"\s*" + _ENUM_TOKEN + r")+)"
+    r"\s*" + _GROUP_TAIL
+)
+
+
+def _key(term: str) -> str:
+    """比较用的归一化键。"""
+    return normalize(term).strip()
+
+
+def find_requirement_groups(jd_content: str) -> List[List[str]]:
+    """从 JD 原文里找出「任一即可」的并列条件组。
+
+    返回示例：``[["Java", "Go", "C++", "PHP"], ["Windows", "Unix", "Linux"]]``
+    """
+    if not jd_content:
+        return []
+    groups: List[List[str]] = []
+    for m in _ENUM_GROUP_RE.finditer(jd_content):
+        raw = m.group(1)
+        members = [x.strip() for x in re.split(r"\s*" + _ENUM_SEP + r"\s*", raw) if x.strip()]
+        members = [x for x in members if len(x) >= 2 and not x.isdigit()]
+        if len(members) >= 2:
+            groups.append(members)
+    return groups
+
+
+def requirement_units(jd_content: str, keywords: List[str]) -> List[tuple]:
+    """把关键词整理成「要求单元」列表：``[(成员列表, 展示标签), ...]``。
+
+    普通关键词自成一个单元；并列条件组整体成为一个单元（标签形如
+    ``Java／Go／C++／PHP（任一）``），满足任意成员即可。
+    """
+    groups = find_requirement_groups(jd_content)
+
+    # 关键词 -> 所属并列组
+    membership: dict = {}
+    for gi, members in enumerate(groups):
+        for mem in members:
+            membership.setdefault(_key(mem), gi)
+
+    units: List[tuple] = []
+    used_group: set = set()
+    for kw in keywords:
+        gi = membership.get(_key(kw))
+        if gi is None:
+            units.append(([kw], kw))
+            continue
+        if gi in used_group:
+            continue
+        used_group.add(gi)
+        members = groups[gi]
+        label = "／".join(members) + "（任一）"
+        units.append((members, label))
+    return units

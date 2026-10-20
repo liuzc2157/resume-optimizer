@@ -46,42 +46,70 @@ REWRITE_SYSTEM_PROMPT = """你是一位专业的简历改写专家。基于以�
 4. 每一条改写建议都要具体到「改哪里、怎么改、为什么」，给出可直接替换的原文和改后文本；
 5. 语气平实克制，像资深招聘官给朋友的建议，不像营销文案。
 
-输出格式要求（严格遵守）：
-1. **改写建议按点分段**：每条建议独立成一段，用「1. 2. 3.」编号，段内固定三行：
-   第一行「位置：<板块>｜原文：<摘句>」
-   第二行「改后：<新写法>」
-   第三行「理由：<一句话>」
-   条与条之间空一行，便于阅读。
-2. 「优化后的完整简历」部分：板块名（教育背景 / 专业技能 / 工作经历 / 项目经历 /
-   证书与荣誉 / 自我评价）各自独占一行作为小标题，要点以「· 」开头、一条一行；
-3. **全篇禁止使用横线或分隔线**（「──」「——」「===」「---」「___」「***」等）做视觉分隔，
-   一律用「小标题 + 空行」区分层级；
-4. Markdown 只用「## 」小标题和编号列表，不要滥用加粗。"""
+输出格式要求（严格遵守）。输出会被前端按 Markdown 渲染，**换行必须用 Markdown 语法**，
+否则多个要点会被挤成同一段：
+1. 改写建议：用「1. 2. 3.」编号，每条建议下面用「- 」列表分三行：
+   - 位置：<板块>｜原文：<摘句>
+   - 改后：<新写法>
+   - 理由：<一句话>
+2. 「## 优化后的完整简历」必须按正式简历排版：
+   - 每个板块单独一个「## 」二级标题：教育背景 / 专业技能 / 实习经历 / 工作经历 /
+     项目经历 / 证书与荣誉 / 自我评价；
+   - 板块内容一律用「- 」无序列表，**一条一行**，严禁把多个要点写进同一行；
+   - 一段经历的写法：「- <学校或公司>｜<专业或职位>｜<起止时间>」，其下的细节各自
+     再占一个「- 」列表项；
+   - 技能项写成「- <分类>：<技能 1>、<技能 2>」，一个分类一行。
+3. 项目符号只能用 Markdown 的「- 」，**禁止**用「·」「•」「・」当项目符号；
+   也禁止靠单个换行分行（Markdown 会把单换行渲染成空格）。
+4. **全篇禁止使用横线或分隔线**（「──」「——」「===」「---」「___」「***」等），
+   层级一律靠标题和空行区分。
+5. 不要滥用加粗，只在「技能名 + 熟练度」处少量使用。"""
 
 
 # 形如「────────」「=====」「----」「***」「___」的纯分隔线
 _SEPARATOR_LINE_RE = re.compile(r"^\s*[─—\-=_*·•~]{3,}\s*$")
+# 模型爱用的「伪项目符号」：它们不是 Markdown 列表标记，
+# 单个换行又会被渲染成空格，结果是所有要点挤成一段。
+_FAKE_BULLETS = "·•・●○▪◆‣"
 
 
-def _strip_separator_lines(text: str) -> str:
-    """删掉纯装饰性分隔线，并把连续空行压成一个。
+def _normalize_markdown(text: str) -> str:
+    """把模型输出规整成能正确渲染的 Markdown。
 
-    模型有时会把原简历里的横线原样复述回来，这里兜底清理，
-    保证输出「靠小标题和空行分层」而不是靠横线。
+    处理三件事（都是实测踩过的坑）：
+    1. 删掉纯装饰分隔线（模型会把原简历里的「────」原样复述回来）；
+    2. 把「·」这类伪项目符号换成 Markdown 的「- 」，否则列表不成列表；
+    3. 标题前补空行，保证被解析成标题而不是上一段的延续。
     """
-    kept: list[str] = []
-    blank = False
+    lines: list[str] = []
     for line in (text or "").split("\n"):
         if _SEPARATOR_LINE_RE.match(line):
             continue
+        stripped = line.lstrip()
+        if stripped and stripped[0] in _FAKE_BULLETS:
+            indent = line[: len(line) - len(stripped)]
+            line = f"{indent}- " + stripped[1:].lstrip()
+        lines.append(line)
+
+    # 标题前补空行
+    spaced: list[str] = []
+    for line in lines:
+        if line.startswith("#") and spaced and spaced[-1].strip():
+            spaced.append("")
+        spaced.append(line)
+
+    # 压缩连续空行
+    out: list[str] = []
+    blank = False
+    for line in spaced:
         if not line.strip():
             if blank:
                 continue
             blank = True
         else:
             blank = False
-        kept.append(line)
-    return "\n".join(kept).strip()
+        out.append(line)
+    return "\n".join(out).strip()
 
 # 三档改写强度：只切换 system prompt 的「强度要求」，缓存键按强度隔离，互不污染。
 INTENSITY_PROMPTS = {
@@ -204,7 +232,7 @@ def rewrite_resume(resume_text: str, jd_text: str, analysis: str, intensity: str
     )
     raw = call_llm(system_prompt, user_prompt, usage_bucket=usage_bucket)
     # 兜底：模型常会把原简历里的「────」横线原样带回来，统一清掉，改为靠小标题分段
-    return _strip_separator_lines(raw)
+    return _normalize_markdown(raw)
 
 
 def format_node(state: "AgentState") -> Dict[str, Any]:

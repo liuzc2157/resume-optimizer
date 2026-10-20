@@ -25,7 +25,12 @@ import re
 from typing import List, Optional
 
 from .embedding import normalize
-from .keywords import extract_jd_keywords, extract_years, is_fresh_graduate_requirement
+from .keywords import (
+    extract_jd_keywords,
+    extract_years,
+    is_fresh_graduate_requirement,
+    requirement_units,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,22 +93,47 @@ def _jd_keywords(jd_content: str, jd_skills: Optional[List[str]]) -> List[str]:
     return extract_jd_keywords(jd_content, jd_skills, limit=20)
 
 
+def _contains(norm_resume: str, term: str) -> bool:
+    """判断归一化后的简历文本里是否出现某个技能词。
+
+    英文/技术标识符**必须按词边界匹配**：直接子串匹配会闹出荒谬误判——
+    「go」会命中简历里的 Django，「java」会命中 JavaScript，「ai」会命中 email。
+    中文没有词边界概念，仍用子串匹配。
+    """
+    key = normalize(term)
+    if not key:
+        return False
+    if term.isascii():
+        return bool(re.search(rf"(?<![a-z0-9]){re.escape(key)}(?![a-z0-9])", norm_resume))
+    return key in norm_resume
+
+
 def _score_keyword(resume: str, jd_content: str, jd_skills: Optional[List[str]]) -> tuple:
     norm = normalize(resume)
     kws = _jd_keywords(jd_content, jd_skills)
     if not kws:
         return 60.0, "未提取到 JD 关键词，给中性分", [], []
-    hit = []
-    miss = []
-    for k in kws:
-        if normalize(k) and normalize(k) in norm:
-            hit.append(k)
+
+    # 按「要求单元」计分：并列条件（「A、B、C 等至少一门」）合并成一项，
+    # 命中任意成员即算满足，不再把「或」当成「与」逐项扣分。
+    units = requirement_units(jd_content, kws)
+    hit: List[str] = []
+    miss: List[str] = []
+    satisfied = 0
+    for members, label in units:
+        matched = [m for m in members if _contains(norm, m)]
+        if matched:
+            satisfied += 1
+            for m in matched:
+                if m not in hit:
+                    hit.append(m)
         else:
-            miss.append(k)
-    ratio = len(hit) / len(kws)
-    detail = f"命中 {len(hit)}/{len(kws)}"
+            miss.append(label)
+
+    ratio = satisfied / len(units) if units else 0.0
+    detail = f"满足 {satisfied}/{len(units)} 项要求"
     if miss:
-        detail += f"，缺失：{('、'.join(miss[:6]))}" + ("…" if len(miss) > 6 else "")
+        detail += f"，缺失：{('、'.join(miss[:5]))}" + ("…" if len(miss) > 5 else "")
     return round(ratio * 100, 1), detail, hit, miss
 
 
