@@ -123,7 +123,10 @@ curl -s -X POST http://localhost:8000/optimize \
 
 ## 配额 / 限流 / 隐私
 
-- **每日配额**：免费档默认 `FREE_DAILY_QUOTA=10` 次/天（`/optimize`、`/chat`、`/compare` 计入），用完返回 `429`；`/users/me` 可查剩余。
+- **每日配额**：免费档默认 `FREE_DAILY_QUOTA=10` 次/天，用完返回 `429`；`/users/me` 可查剩余。
+  计入配额的接口：`/optimize`、`/chat`、`/compare`、`/match`（仅 `use_rag=true` 时）、`/rag/retrieve`。
+  判定口径是「是否真的会调 LLM」：`/match?use_rag=false` 只做关键词重叠 + 技能加权的本地计算，
+  以 `/match/keyword` 单独记账，**不占配额**。
 - **请求限流**：每用户每分钟 `RATE_LIMIT_PER_MINUTE`（默认 30）滑动窗口；`/auth` 按 IP 限流防爆破。
 - **隐私合规**：注册必须同意《隐私政策》；所有业务数据按 `user_id` 隔离（缓存/JD/会话互不可见）；注销会删除该用户全部数据（含向量）。
 

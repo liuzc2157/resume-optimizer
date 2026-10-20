@@ -1,6 +1,6 @@
 """Pydantic 请求/响应模型（新增缓存与匹配相关字段）。"""
 
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -20,10 +20,11 @@ class OptimizeRequest(BaseModel):
     jd_id: Optional[int] = Field(None, description="指定库内 JD 的 id（可选）")
     position_category: Optional[str] = Field(None, description="目标岗位类别，如 后端/前端/算法")
     experience_level: Optional[str] = Field(None, description="目标经验等级，如 初级/中级/高级/资深")
-    intensity: Optional[str] = Field(
+    intensity: Literal["light", "enhance", "rewrite"] = Field(
         "enhance",
         description="改写强度：light=轻推微调 / enhance=关键词增强（默认） / rewrite=整篇重写。"
-        "不同强度缓存互相隔离，不会串结果。",
+        "不同强度缓存互相隔离，不会串结果。传其它值会直接返回 422，"
+        "不再静默退化为默认提示词。",
     )
     save_jd: bool = Field(
         True,

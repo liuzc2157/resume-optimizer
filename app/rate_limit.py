@@ -35,7 +35,9 @@ AUTH_IP_RATE_LIMIT = int(os.getenv("AUTH_IP_RATE_LIMIT", "20"))
 # 免费档每日默认配额（可被 User.daily_quota 覆盖；0 = 不限）
 FREE_DAILY_QUOTA = int(os.getenv("FREE_DAILY_QUOTA", "10"))
 # 哪些接口消耗每日配额（按 endpoint 名匹配）
-QUOTA_ENDPOINTS = {"/optimize", "/chat", "/compare"}
+# 注意：/match 只在 use_rag=True 时消耗配额（会调 LLM 提炼检索词），
+# 纯关键词匹配属于零成本计算，接口会以 "/match/keyword" 单独记账，不计入配额。
+QUOTA_ENDPOINTS = {"/optimize", "/chat", "/compare", "/match", "/rag/retrieve"}
 
 
 class SlidingWindowLimiter:

@@ -228,7 +228,10 @@ def match(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Match 执行失败")
         raise HTTPException(status_code=502, detail=f"Match 执行失败：{exc}") from exc
-    record_usage(s, user.id, "/match", cache_hit=False, bucket=usage)
+    # 只有走 RAG（会调 LLM 提炼检索词）才算一次配额消耗；
+    # 纯关键词匹配是零成本计算，用单独标签记账，不计入 quota。
+    match_endpoint = "/match" if req.use_rag else "/match/keyword"
+    record_usage(s, user.id, match_endpoint, cache_hit=False, bucket=usage)
     return MatchResponse(
         matches=[MatchedJDSchema(**m) for m in result["matches"]],
         mode=result["mode"],
@@ -248,6 +251,8 @@ def rag_retrieve_endpoint(
         result = rag.rag_retrieve(
             req.resume_text, top_k=req.top_k, category=req.category, level=req.level, user_id=user.id
         )
+        # 该接口内部会调用 LLM 提炼简历查询词，必须计入配额并写用量日志
+        record_usage(s, user.id, "/rag/retrieve", cache_hit=False, bucket=usage)
         return RagRetrieveResponse(
             query_text=result["query_text"],
             items=[RagItem(**it) for it in result["items"]],
