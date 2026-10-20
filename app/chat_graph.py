@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import operator
+import re
 from typing import Annotated, Any, Dict, List, Optional, Tuple, TypedDict
 
 from langchain_core.runnables import RunnableConfig
@@ -111,10 +112,63 @@ class ChatState(TypedDict):
     last_cache_hit: bool
 
 
+# ---- 确定性入库：不依赖模型"记得"调工具 ----
+# 线上缺陷：模型经常只回一句「简历已记录 / JD 已记录」而**不实际调用**工具，
+# 于是 state.resume_text / jd_text 一直是空的。后续 analyze_match 又静默回落到
+# 岗位库的一份替补 JD，最终用「空简历 × 别人的 JD」拼出一份凭空捏造的分析
+# （线上出现过 Python 后端应届生被判为「有 3 年经验、移动端 Dart/React 跨端」）。
+# 因此这里按文本特征做一次确定性受理，模型若额外调用工具也只是覆盖同一份内容。
+_JD_MARKERS = (
+    "岗位职责", "任职要求", "任职资格", "工作职责", "职位描述", "岗位要求",
+    "工作地点", "薪资范围", "学历要求", "岗位名称",
+)
+_RESUME_MARKERS = (
+    "教育背景", "工作经历", "项目经历", "实习经历", "专业技能", "自我评价",
+    "求职意向", "主修课程", "毕业", "学历",
+)
+
+
+def _classify_pasted(text: str) -> str:
+    """判断用户粘贴的是一份简历、一份 JD，还是普通提问。"""
+    t = text or ""
+    if len(t) < 30:
+        return "other"
+    jd_hits = sum(1 for m in _JD_MARKERS if m in t)
+    resume_hits = sum(1 for m in _RESUME_MARKERS if m in t)
+    # 简历里也可能写「求职意向」「学历」，JD 里也可能写「项目经验」，
+    # 所以用命中数量对比而不是"任一命中"。
+    if jd_hits >= 2 and jd_hits > resume_hits:
+        return "jd"
+    if resume_hits >= 2 and resume_hits > jd_hits:
+        return "resume"
+    return "other"
+
+
+def ingest_node(state: ChatState) -> Dict[str, Any]:
+    """入库节点：把本轮用户粘贴的简历/JD 确定性地写进 state。
+
+    放在 agent_node 之前，保证「先有材料、再有分析」的顺序，不依赖模型的工具调用。
+    """
+    last_user = next(
+        (m.get("content") or "" for m in reversed(state["messages"]) if m.get("role") == "user"),
+        "",
+    )
+    kind = _classify_pasted(last_user)
+    if kind == "jd":
+        logger.info("[ingest] 识别为岗位 JD（%d 字），已入库", len(last_user))
+        return {"jd_text": last_user.strip()}
+    if kind == "resume":
+        logger.info("[ingest] 识别为简历（%d 字），已入库", len(last_user))
+        return {"resume_text": last_user.strip()}
+    return {}
+
+
 def agent_node(state: ChatState, config: RunnableConfig) -> Dict[str, Any]:
     """LLM 决策节点：根据完整历史决定「调用工具」还是「直接回复」。"""
     usage_bucket = (config or {}).get("configurable", {}).get("usage_bucket")
-    reply = call_llm_messages(state["messages"], tools=TOOLS, usage_bucket=usage_bucket)
+    reply = call_llm_messages(
+        _sanitize_messages(state["messages"]), tools=TOOLS, usage_bucket=usage_bucket
+    )
     msg: dict = {"role": "assistant", "content": reply.content or ""}
     if reply.tool_calls:
         msg["tool_calls"] = [
@@ -132,6 +186,53 @@ def route_after_agent(state: ChatState) -> str:
     """条件路由：有 tool_calls → 执行工具；否则对话结束。"""
     last = state["messages"][-1]
     return "tool_node" if last.get("tool_calls") else END
+
+
+# 分析报告第一行的「SCORE: 70」，展示前要剥掉（它由独立字段承载）
+_SCORE_LINE_RE = re.compile(r"^\s*SCORE\s*[:：]\s*(\d{1,3})\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _format_analysis_reply(analysis: str, cache_hit: bool) -> str:
+    """把分析原文整理成可直接展示的回复。
+
+    为什么不让模型转述：工具已经产出了完整分析，再让模型"用友好的语言转述一遍"
+    纯属多此一举，而且小模型会把结论改写走样（实测出现过把 Python 后端简历
+    说成「拥有移动端 / Dart / React 跨端经验」）。这里直接回原文，杜绝失真。
+    """
+    text = (analysis or "").strip()
+    m = _SCORE_LINE_RE.search(text)
+    score = m.group(1) if m else None
+    if m:
+        text = (text[: m.start()] + text[m.end():]).strip()
+    head = "## 匹配度分析"
+    if score:
+        head += f"（自评 {score} / 100）"
+    if cache_hit:
+        head += " · 命中缓存"
+    return f"{head}\n\n{text}" if text else head
+
+
+def route_after_tool(state: ChatState) -> str:
+    """工具已直接产出回复（分析/改写）时结束本轮，不再让模型二次转述。"""
+    last = state["messages"][-1]
+    return END if last.get("role") == "assistant" else "agent_node"
+
+
+def _sanitize_messages(messages: List[dict]) -> List[dict]:
+    """清洗发给模型的消息列表，避免因空消息被供应商判为「messages 参数非法」。
+
+    实测：assistant 消息 content 为空且没有 tool_calls 时，部分 OpenAI 兼容服务
+    （如智谱）会直接返回 400，导致整轮对话失败。
+    """
+    cleaned: List[dict] = []
+    for m in messages or []:
+        msg = dict(m)
+        if msg.get("content") is None:
+            msg["content"] = ""
+        if msg.get("role") == "assistant" and not msg.get("content") and not msg.get("tool_calls"):
+            continue
+        cleaned.append(msg)
+    return cleaned
 
 
 def _resolve_content(
@@ -154,12 +255,26 @@ def _resolve_content(
             jd = matching.get_jd(jd_id, s)
             if jd:
                 return jd.content, jd
+        # 只有用户**显式**给了岗位类别/经验等级，才允许从岗位库挑一份 JD。
+        # 否则一律返回空、由调用方提示补材料——绝不能拿一份无关的种子 JD 顶替，
+        # 那会让模型对着别人的岗位要求编分析（线上就是这么编出「3 年经验」的）。
+        if not (category or level):
+            return "", None
         matches = matching.match_jds(resume_text, category, level, top_n=1, session=s)
         if matches:
             return matches[0].jd.content, matches[0].jd
     finally:
         s.close()
     return "", None
+
+
+def _missing_materials_reply(resume_text: str) -> str:
+    """材料缺失时给出的用户可读提示（明确还缺什么，而不是含糊报错）。"""
+    need: List[str] = []
+    if not (resume_text or "").strip():
+        need.append("候选人简历")
+    need.append("目标岗位 JD（或者告诉我岗位类别 + 经验等级，我从岗位库匹配）")
+    return "还缺少以下材料，暂时无法分析：\n" + "\n".join(f"- {n}" for n in need)
 
 
 def _run_analysis(
@@ -171,7 +286,7 @@ def _run_analysis(
 
     content, jd = _resolve_content(state_updates, state, resume_text, user_id=user_id)
     if not content:
-        return "简历或 JD 尚未提供，无法分析。请先让用户提供缺失的材料，或指定岗位类别与经验等级。", False
+        return _missing_materials_reply(resume_text), False
 
     cat = state_updates.get("position_category", state.get("position_category", "")) or (jd.position_category if jd else None)
     lvl = state_updates.get("experience_level", state.get("experience_level", "")) or (jd.experience_level if jd else None)
@@ -196,7 +311,7 @@ def _run_rewrite(
 
     content, jd = _resolve_content(state_updates, state, resume_text, user_id=user_id)
     if not content:
-        return "简历或 JD 尚未提供，无法改写。请先让用户提供缺失的材料，或指定岗位类别与经验等级。", False
+        return _missing_materials_reply(resume_text), False
 
     cat = state_updates.get("position_category", state.get("position_category", "")) or (jd.position_category if jd else None)
     lvl = state_updates.get("experience_level", state.get("experience_level", "")) or (jd.experience_level if jd else None)
@@ -228,6 +343,7 @@ def tool_node(state: ChatState, config: RunnableConfig) -> Dict[str, Any]:
 
     resume_text = state_updates.get("resume_text", state.get("resume_text", ""))
     jd_text = state_updates.get("jd_text", state.get("jd_text", ""))
+    reply_text: Optional[str] = None
 
     for tc in last.get("tool_calls", []):
         name = tc["function"]["name"]
@@ -250,6 +366,8 @@ def tool_node(state: ChatState, config: RunnableConfig) -> Dict[str, Any]:
                 resume_text, state_updates, state, user_id=user_id, usage_bucket=usage_bucket
             )
             cache_hit_any = cache_hit_any or hit
+            # 分析原文直接作为本轮回复，不让模型二次转述（避免结论被改写走样）
+            reply_text = _format_analysis_reply(result, hit)
             if hit:
                 result = f"（⚡命中缓存，未调用模型）\n\n{result}"
         elif name == "rewrite_resume":
@@ -257,6 +375,7 @@ def tool_node(state: ChatState, config: RunnableConfig) -> Dict[str, Any]:
                 resume_text, state_updates, state, user_id=user_id, usage_bucket=usage_bucket
             )
             cache_hit_any = cache_hit_any or hit
+            reply_text = result
             if hit:
                 result = f"（⚡命中缓存，未调用模型）\n\n{result}"
         else:
@@ -265,18 +384,26 @@ def tool_node(state: ChatState, config: RunnableConfig) -> Dict[str, Any]:
         logger.info("[tool_node] 执行工具 %s（cache_hit=%s）", name, cache_hit_any)
         tool_messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
 
-    return {"messages": tool_messages, "last_cache_hit": cache_hit_any, **state_updates}
+    out_messages = list(tool_messages)
+    if reply_text:
+        # 追加为最终 assistant 消息，route_after_tool 看到它就直接结束本轮
+        out_messages.append({"role": "assistant", "content": reply_text})
+    return {"messages": out_messages, "last_cache_hit": cache_hit_any, **state_updates}
 
 
 def build_chat_graph():
     """构建并编译对话 Agent（带 Checkpointer，支持多轮会话）。"""
     graph = StateGraph(ChatState)
+    graph.add_node("ingest_node", ingest_node)
     graph.add_node("agent_node", agent_node)
     graph.add_node("tool_node", tool_node)
 
-    graph.set_entry_point("agent_node")
+    # 先做确定性入库（不依赖模型调工具），再交给模型决策
+    graph.set_entry_point("ingest_node")
+    graph.add_edge("ingest_node", "agent_node")
     graph.add_conditional_edges("agent_node", route_after_agent, ["tool_node", END])
-    graph.add_edge("tool_node", "agent_node")
+    # 分析/改写已产出最终回复 → 直接结束；只做了保存 → 回到 agent 生成确认语
+    graph.add_conditional_edges("tool_node", route_after_tool, ["agent_node", END])
 
     return graph.compile(checkpointer=get_db_checkpointer())
 
