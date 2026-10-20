@@ -33,7 +33,12 @@ interface OptimizeResponse {
   cache_similarity?: number;
   matched_jd?: MatchedJD | null;
   matches: MatchedJD[];
-  breakdown?: { total: number; dimensions: ScoreDimension[] } | null;
+  breakdown?: {
+    total: number;
+    job_fit?: number | null;
+    resume_quality?: number | null;
+    dimensions: ScoreDimension[];
+  } | null;
   messages: string[];
 }
 
@@ -483,6 +488,20 @@ const saveResume = async () => {
           <div className="rounded-xl bg-gradient-to-br from-indigo-500 via-violet-500 to-purple-500 p-6 text-center shadow-lg">
             <p className="text-sm text-indigo-100">ATS 多维评分（规则计算）</p>
             <p className="mt-1 text-6xl font-extrabold text-white">{result.score}</p>
+            {result.breakdown?.job_fit != null && (
+              <p className="mt-2 text-xs text-indigo-100/90">
+                岗位匹配度{" "}
+                <span className="text-base font-bold text-white">{result.breakdown.job_fit}</span>
+                {" "}· 简历质量{" "}
+                <span className="font-semibold text-indigo-50">
+                  {result.breakdown.resume_quality ?? "-"}
+                </span>
+                <br />
+                <span className="opacity-80">
+                  总分含 45% 的简历自身质量分；判断是否投对方向请看岗位匹配度
+                </span>
+              </p>
+            )}
             {result.llm_score != null && result.llm_score !== result.score && (
               <p className="mt-1 text-xs text-indigo-100/90">
                 AI 整体评分 {result.llm_score} · 两者口径不同，ATS 分看硬指标，AI 分偏主观

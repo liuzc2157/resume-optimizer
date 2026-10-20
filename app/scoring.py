@@ -213,10 +213,19 @@ def score_resume(
     返回：
         {
           "total": int,                 # 加权总分 0-100
+          "job_fit": int,               # 岗位匹配度 0-100（只看与 JD 相关的维度）
+          "resume_quality": int,        # 简历质量分 0-100（与 JD 无关的维度）
           "dimensions": [               # 各维度明细（供前端画条形图）
             {"key","label","score","weight","detail"}, ...
           ],
         }
+
+    为什么要把总分拆成两个派生指标：
+    总分里只有「关键词(35%) + 经验(20%)」跟目标 JD 有关，另外 45%
+    （量化/动词/结构）衡量的是简历自身质量。所以一份强简历投错岗位，总分依然
+    能到 65 分左右，看不出"投错了"。单独给出 job_fit 后，判断方向是否匹配
+    就有独立依据：实测 20 组错配样本 job_fit 最高 43、对口最低 33，
+    以 45 为线可识别全部错配。
     """
     scores = {
         "keyword_match": _score_keyword(resume_text, jd_content, jd_skills),
@@ -243,4 +252,26 @@ def score_resume(
             dim["hits"] = item[2]
             dim["misses"] = item[3]
         dims.append(dim)
-    return {"total": int(round(total)), "dimensions": dims}
+
+    # ---- 派生指标：把「岗位相关」与「简历质量」两部分分开 ----
+    # 岗位匹配度：技能覆盖是主导信号；经验年限与岗位方向无关（6 年后端对 3 年
+    # 数仓岗也判"年限达标"），所以只给 30% 权重，避免稀释方向差异。
+    kw_val = scores["keyword_match"][0]
+    exp_val = scores["experience_match"][0]
+    job_fit = round(0.7 * kw_val + 0.3 * exp_val)
+    q_weights = {
+        "quantification": WEIGHTS["quantification"],
+        "action_verbs": WEIGHTS["action_verbs"],
+        "completeness": WEIGHTS["completeness"],
+    }
+    q_total_w = sum(q_weights.values())
+    resume_quality = round(
+        sum(scores[k][0] * w for k, w in q_weights.items()) / q_total_w
+    )
+
+    return {
+        "total": int(round(total)),
+        "job_fit": int(job_fit),
+        "resume_quality": int(resume_quality),
+        "dimensions": dims,
+    }

@@ -61,6 +61,16 @@ class ScoreBreakdown(BaseModel):
     """多维度评分明细。"""
 
     total: int = Field(..., description="加权总分 0-100（确定性计算，非 LLM 生成）")
+    job_fit: Optional[int] = Field(
+        None,
+        description="岗位匹配度 0-100：只由与 JD 相关的维度构成"
+        "（关键词覆盖 70% + 经验年限 30%）。总分里另有 45% 是简历自身质量，"
+        "会托高错配岗位的分数，判断「是不是投错方向」请看这个指标。",
+    )
+    resume_quality: Optional[int] = Field(
+        None,
+        description="简历质量分 0-100：与目标 JD 无关的维度（成果量化 / 行动动词 / 结构完整度）",
+    )
     dimensions: List[ScoreDimension] = Field(default_factory=list)
 
 
